@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from cryptography.fernet import Fernet
 from telegram.error import BadRequest
@@ -129,6 +129,16 @@ class SimpleFlowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.manager.callback(update(callback=f'yes:{pending.nonce}'), self.context)
         self.assertFalse(any(name == 'create_server' for name, _ in self.requests))
+
+    async def test_plan_prices_are_displayed_with_two_decimal_places(self):
+        for raw, expected in [('4', '4.00'), ('0.1', '0.10'), ('4.995', '5.00'), ('6.23456', '6.23')]:
+            with self.subTest(price=raw), patch.dict(PLAN, {'prices': [
+                    {'location': 'fsn1', 'price_monthly': {'gross': raw}}]}):
+                await self.start('create_server')
+                await self.manager.text(update(text='my-server'), self.context)
+                await self.click('pick:0')
+                label = self.context.user_data['input']['options'][0][1]
+                self.assertIn(f'{expected} USD/', label)
 
     async def test_expired_and_old_wizard_buttons_are_rejected(self):
         await self.start('create_server')

@@ -2,6 +2,7 @@
 from .i18n import tr
 import secrets
 import time
+from decimal import Decimal, ROUND_HALF_UP
 
 from .api import BY_ID, prepare
 from .availability import all_items, available_plan
@@ -108,7 +109,8 @@ class SimpleUI:
                 amount = (price.get('price_monthly') or {}).get('gross')
                 label = tr('{0} · {1} هسته · {2} GB RAM', plan['name'], plan.get('cores', '?'), plan.get('memory', '?'))
                 if amount and currency:
-                    label += tr(' · {0} {1}/ماه', amount, currency)
+                    display_price = format(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), '.2f')
+                    label += tr(' · {0} {1}/ماه', display_price, currency)
                 result.append((plan['name'], label, plan))
             return result
         if mode in {'image', 'restore'}:
