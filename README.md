@@ -20,7 +20,7 @@
 
 ## نصب عمومی روی VPS
 
-پیش‌نیاز: Linux، Git، Python 3 و [Docker Engine همراه Compose plugin](https://docs.docker.com/engine/install/). دسترسی خروجی HTTPS به Telegram و Hetzner لازم است. پورت ورودی، دامنه و SSL لازم نیست؛ بات از long polling استفاده می‌کند.
+پیش‌نیاز: Linux و Git، همراه دسترسی root یا sudo. اسکریپت روی Ubuntu 22.04/24.04/26.04/26.10 و Debian 12/13، Docker Engine، افزونهٔ Compose و Python 3 را در صورت نیاز نصب می‌کند. دسترسی خروجی HTTPS به مخازن بسته‌ها، Telegram و Hetzner لازم است. پورت ورودی، دامنه و SSL لازم نیست؛ بات از long polling استفاده می‌کند.
 
 ```bash
 git clone https://github.com/mahxray/Hetzner-Manager-bot.git
@@ -28,7 +28,7 @@ cd Hetzner-Manager-bot
 bash install.sh
 ```
 
-اسکریپت وابستگی سیستمی نصب نمی‌کند. اگر Docker نصب نیست، ابتدا طبق راهنمای رسمی بالا نصب کنید. کاربر اجراکننده باید مجوز اجرای Docker داشته باشد.
+نصب Docker از مخزن APT رسمی و مطابق [راهنمای Ubuntu](https://docs.docker.com/engine/install/ubuntu/) و [راهنمای Debian](https://docs.docker.com/engine/install/debian/) انجام می‌شود. اگر Docker و Compose از قبل آماده باشند، دوباره نصب نمی‌شوند. در صورت نیاز سرویس Docker راه‌اندازی و برای اجرای دستورات همین اسکریپت از sudo استفاده می‌شود؛ عضویت گروه کاربر تغییر نمی‌کند. اگر بسته‌های موجود با نصب رسمی تعارض داشته باشند، نصب متوقف می‌شود و آن بسته‌ها خودکار حذف نمی‌شوند. روی سایر توزیع‌ها Docker و Compose را دستی نصب کنید؛ اگر از قبل آماده باشند، اسکریپت می‌تواند بات را اجرا کند.
 
 در اجرای اول، اسکریپت این موارد را می‌پرسد:
 
