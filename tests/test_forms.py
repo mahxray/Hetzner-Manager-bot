@@ -156,11 +156,12 @@ class FormTests(unittest.IsolatedAsyncioTestCase):
         await self.start('create_server')
         await self.field('body')
         await self.field('server_type')
-        self.cloud.execute.return_value = {'server_types': [{'id': 8, 'name': 'cx23', 'cores': 2, 'memory': 4}],
+        self.cloud.execute.return_value = {'server_types': [{'id': 8, 'name': 'cx23', 'cores': 2, 'memory': 4,
+                                                            'locations': [{'name': 'fsn1', 'available': True}]}],
                                            'meta': {'pagination': {'next_page': None}}}
         await self.click('pick:1')
         self.cloud.execute.assert_awaited_once_with('private-project-token', BY_ID['list_server_types'],
-                                                   {'query': {'page': 1, 'per_page': 8}})
+                                                   {'query': {'page': 1, 'per_page': 50}})
         await self.click('choose:0')
         self.assertEqual(self.context.user_data['input']['payload']['body']['server_type'], 'cx23')
 

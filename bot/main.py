@@ -18,6 +18,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from .api import BY_ID, OPERATIONS, Cloud, CloudError, prepare, redact, sample, schema_for
 from .storage import Store
 from .forms import Forms, title
+from .simple import SimpleUI, STATUS, server_card
 
 TAGS = sorted({op["tag"] for op in OPERATIONS})
 COLLECTIONS = [
@@ -48,6 +49,7 @@ class Pending:
     operation: str
     payload: dict
     expires: float
+    simple: bool = False
 
 
 def consume_pending(state, nonce, now=None):
@@ -76,6 +78,17 @@ class Manager:
     def __init__(self, store, cloud, allowed):
         self.store, self.cloud, self.allowed = store, cloud, allowed
         self.forms = Forms(self)
+        self.simple = SimpleUI(self)
+
+    async def show(self, update, text, rows):
+        message = update.effective_message
+        if getattr(update.callback_query, 'data', None) and hasattr(message, 'edit_text'):
+            try:
+                await message.edit_text(text, reply_markup=keyboard(rows))
+                return
+            except TelegramError:
+                pass
+        await message.reply_text(text, reply_markup=keyboard(rows))
 
     def authorized(self, update):
         return (update.effective_user is not None and update.effective_chat is not None
@@ -108,9 +121,10 @@ class Manager:
             return
         await update.effective_message.reply_text(
             "/projects — پروژه‌ها\n/add — افزودن پروژه\n/cancel — لغو ورودی و تأیید\n"
-            "در پروژه: منابع برای انتخاب و مدیریت؛ فرم مرحله‌ای برای ورود تنظیمات با دکمه.\n"
-            "علامت * یعنی فیلد الزامی. بخش‌های تنظیمات و فهرست‌ها را باز و ویرایش کنید؛ "
-            "در پایان «بررسی و ادامه» را بزنید. حالت پیشرفتهٔ JSON هم در دسترس است.\n"
+            "۱. پروژه‌ات را انتخاب کن.\n۲. وارد سرورها، اسنپ‌شات‌ها یا IPها شو.\n"
+            "۳. منبع و کار مورد نظر را انتخاب کن؛ بات مرحله‌به‌مرحله راهنمایی می‌کند.\n"
+            "ساخت سرور: نام ← کشور ← پلن موجود ← سیستم‌عامل ← کلید SSH ← تأیید.\n"
+            "ابزارهای تخصصی در تنظیمات پروژه ← بخش پیشرفته هستند.\n"
             "هر تغییر نیازمند تأیید ۲ دقیقه‌ای است. پاسخ running به معنی پایان عملیات نیست؛ "
             "دکمهٔ پیگیری را بزنید. پاسخ محرمانه فقط با درخواست جدا نمایش داده می‌شود.")
 
@@ -123,13 +137,85 @@ class Manager:
 
     async def menu(self, update, pid):
         name, _ = await self.project(update, pid)
-        await update.effective_message.reply_text(f"پروژه: {name}", reply_markup=keyboard([
-            [("🖥 سرورها", f"servers:{pid}:1"), ("➕ ساخت سرور", f"form:{pid}:{OPERATIONS.index(BY_ID['create_server'])}")],
-            [("📦 مدیریت همهٔ منابع", f"resources:{pid}")],
-            [("🧰 تمام عملیات و فرم‌ها", f"tags:{pid}:0")],
-            [("حذف اتصال پروژه از بات", f"forget:{pid}")],
-            [("پروژه‌ها", "projects")],
-        ]))
+        await self.show(update, f"📁 {name}\nچه کاری می‌خواهی انجام بدهی؟", [
+            [("🖥 سرورهای من", f"servers:{pid}:1"), ("➕ ساخت سرور", f"new:{pid}:{OPERATIONS.index(BY_ID['create_server'])}")],
+            [("📸 اسنپ‌شات و بکاپ", f"images:{pid}:snapshot:1"), ("🌐 آدرس‌های IP", f"ips:{pid}:1")],
+            [("⚙️ تنظیمات پروژه", f"settings:{pid}")],
+            [("↩️ تغییر پروژه", "projects")],
+        ])
+
+    async def simple_screen(self, update, context, pid, kind, args):
+        project, token = await self.project(update, pid)
+        def action(label, operation, resource_id=None):
+            index = OPERATIONS.index(BY_ID[operation])
+            return (label, f'do:{pid}:{index}:{resource_id}' if resource_id is not None else f'new:{pid}:{index}')
+        if kind == 'sub':
+            server_id, section = int(args[0]), args[1]
+            server = (await self.cloud.execute(token, BY_ID['get_server'], {'path': {'id': server_id}}))['server']
+            if section == 'backup':
+                rows = [[action('📸 ساخت اسنپ‌شات', 'create_server_image', server_id)],
+                        [action('فعال کردن بکاپ خودکار', 'enable_server_backup', server_id),
+                         action('خاموش کردن بکاپ خودکار', 'disable_server_backup', server_id)],
+                        [('📂 اسنپ‌شات‌ها', f'images:{pid}:snapshot:1'), ('📂 بکاپ‌ها', f'images:{pid}:backup:1')]]
+            else:
+                rows = [[action('✏️ تغییر نام', 'update_server', server_id), action('⬆️ تغییر پلن', 'change_server_type', server_id)],
+                        [action('🛠 نصب مجدد / بازیابی', 'rebuild_server', server_id)],
+                        [action('🔑 بازنشانی گذرواژه', 'reset_server_password', server_id)],
+                        [action('فعال کردن Rescue', 'enable_server_rescue', server_id),
+                         action('غیرفعال کردن Rescue', 'disable_server_rescue', server_id)],
+                        [action('قطع برق اجباری', 'poweroff_server', server_id), action('🗑 حذف سرور', 'delete_server', server_id)],
+                        [('تنظیمات تخصصی', f'item:{pid}:0:{server_id}:0')]]
+            rows.append([('بازگشت به سرور', f'srv:{pid}:{server_id}')])
+            await self.show(update, f"{server['name']}\nپروژه: {project}\n{'اسنپ‌شات و بکاپ' if section == 'backup' else 'تغییرات سرور'}", rows)
+            return
+        if kind in {'images', 'ips'}:
+            page = int(args[-1])
+            collection = 'images' if kind == 'images' else 'primary_ips'
+            query = {'page': page, 'per_page': 8}
+            if kind == 'images':
+                query['type'] = [args[0]]
+            result = await self.cloud.execute(token, BY_ID['list_' + collection], {'query': query})
+            rows = []
+            for item in result[collection]:
+                label = item.get('name') or item.get('description') or str(item['id'])
+                if kind == 'ips':
+                    label += f" · {item.get('ip', 'در حال تخصیص')}"
+                rows.append([(label, f"{'pic' if kind == 'images' else 'ip'}:{pid}:{item['id']}")])
+            nav = []
+            prefix = f'images:{pid}:{args[0]}' if kind == 'images' else f'ips:{pid}'
+            if page > 1:
+                nav.append(('قبلی', f'{prefix}:{page-1}'))
+            if result.get('meta', {}).get('pagination', {}).get('next_page'):
+                nav.append(('بعدی', f'{prefix}:{page+1}'))
+            if nav:
+                rows.append(nav)
+            if kind == 'images':
+                rows += [[('📸 اسنپ‌شات‌ها', f'images:{pid}:snapshot:1'), ('بکاپ‌های خودکار', f'images:{pid}:backup:1')],
+                         [action('➕ ساخت اسنپ‌شات', 'create_server_image')]]
+                heading = 'اسنپ‌شات‌ها' if args[0] == 'snapshot' else 'بکاپ‌های خودکار'
+            else:
+                rows.append([action('➕ ساخت IP', 'create_primary_ip')])
+                heading = 'آدرس‌های IP'
+            rows.append([('🔄 تازه‌سازی', f'{prefix}:{page}'), ('بازگشت', f'p:{pid}')])
+            await self.show(update, f"{heading}\nپروژه: {project}\n" +
+                            ('یک مورد را انتخاب کن.' if result[collection] else 'هنوز موردی وجود ندارد.'), rows)
+            return
+        resource_id = int(args[0])
+        if kind == 'pic':
+            item = (await self.cloud.execute(token, BY_ID['get_image'], {'path': {'id': resource_id}}))['image']
+            await self.show(update, f"📸 {item.get('description') or item.get('name') or resource_id}\n"
+                            f"پروژه: {project}\nاندازه: {item.get('image_size', '—')} GB\n"
+                            f"وضعیت: {item.get('status', '—')}", [
+                [('♻️ بازیابی روی سرور', f'restore:{pid}:{resource_id}')],
+                [action('✏️ تغییر نام', 'update_image', resource_id), action('🗑 حذف', 'delete_image', resource_id)],
+                [('بازگشت', f'images:{pid}:snapshot:1')]])
+        elif kind == 'ip':
+            item = (await self.cloud.execute(token, BY_ID['get_primary_ip'], {'path': {'id': resource_id}}))['primary_ip']
+            await self.show(update, f"🌐 {item['name']}\nپروژه: {project}\nIP: {item.get('ip', '—')}\n"
+                            f"سرور متصل: {item.get('assignee_id') or 'متصل نیست'}", [
+                [action('اتصال به سرور', 'assign_primary_ip', resource_id), action('جدا کردن IP', 'unassign_primary_ip', resource_id)],
+                [action('✏️ تغییر نام', 'update_primary_ip', resource_id), action('🗑 حذف IP', 'delete_primary_ip', resource_id)],
+                [('بازگشت', f'ips:{pid}:1')]])
 
     async def resources(self, update, pid, collection_index, page):
         name, token = await self.project(update, pid)
@@ -199,12 +285,28 @@ class Manager:
             reply_markup=keyboard([[("راهنمای فیلدها (JSON Schema)", f"schema:{pid}:{index}")]]))
         await self.send_json(update, payload, "example.json")
 
-    async def preview(self, update, context, pid, op, payload):
+    async def preview(self, update, context, pid, op, payload, simple=False, labels=None):
         prepare(op, payload)
         name, token = await self.project(update, pid)
         context.user_data.clear()
-        pending = Pending(secrets.token_hex(12), pid, op["id"], payload, time.monotonic() + 120)
+        pending = Pending(secrets.token_hex(12), pid, op["id"], payload, time.monotonic() + 120, simple)
         context.user_data["pending"] = pending
+        if simple:
+            from .forms import FIELDS
+            details = dict(labels or {})
+            for key, value in payload.get('body', {}).items():
+                if key not in details:
+                    details[key] = 'بله' if value is True else 'خیر' if value is False else str(value)
+            if payload.get('path') and 'سرور' not in details:
+                details['شناسهٔ منبع'] = str(next(iter(payload['path'].values())))
+            warning = ('⚠️ تمام اطلاعات دیسک پاک می‌شود.' if op['id'] == 'rebuild_server' else
+                       '⚠️ حذف منبع دائمی است.' if op['method'] == 'DELETE' else
+                       'ایجاد یا تغییر منابع می‌تواند هزینه داشته باشد و اتصال سرور را قطع کند.')
+            text = f"{title(op)}\nپروژه: {name}\n\n" + '\n'.join(
+                f"{FIELDS.get(k, k)}: {str(v)[:250]}" for k, v in details.items())
+            await self.show(update, text[:2800] + f"\n\n{warning}\nانجام شود؟", [
+                [('✅ تأیید و انجام', f'yes:{pending.nonce}'), ('✖️ انصراف', f'p:{pid}')]])
+            return
         await update.effective_message.reply_text(
             f"⚠ تأیید تغییر — پروژه: {name}\n{op['summary']}\n{op['method']} {op['path']}\n"
             "این عملیات ممکن است هزینه ایجاد کند، سرویس را قطع کند یا داده را حذف کند. "
@@ -213,18 +315,34 @@ class Manager:
         await update.effective_message.reply_text("اجرا شود؟", reply_markup=keyboard([
             [("✅ تأیید و اجرا", f"yes:{pending.nonce}"), ("لغو", "cancel")]]))
 
-    async def execute(self, update, context, pid, op, payload):
+    async def execute(self, update, context, pid, op, payload, simple=False):
         name, token = await self.project(update, pid)
+        if simple and op['id'] == 'create_server':
+            await self.simple.validate_create(token, payload)
         result = await self.cloud.execute(token, op, payload)
         logging.info("cloud_request project=%s operation=%s", pid, op["id"])
-        await update.effective_message.reply_text(f"پروژه: {name} — پاسخ هتزنر:")
-        await self.send_json(update, redact(result, (token,)))
+        if simple:
+            action = result.get('action', {})
+            status = action.get('status')
+            message = ('⏳ درخواست ثبت شد و در حال انجام است.' if status == 'running' else
+                       '❌ عملیات در هتزنر ناموفق بود.' if status == 'error' else
+                       '✅ عملیات انجام شد.' if status == 'success' else '✅ هتزنر درخواست را پذیرفت.')
+            if isinstance(result.get('server'), dict) and 'name' in result['server']:
+                message += f"\nسرور: {result['server']['name']}\nIPv4: {((result['server'].get('public_net') or {}).get('ipv4') or {}).get('ip', 'هنوز تخصیص داده نشده')}"
+        else:
+            await update.effective_message.reply_text(f"پروژه: {name} — پاسخ هتزنر:")
+            await self.send_json(update, redact(result, (token,)))
         # Sensitive responses are private and opt-in, never logs or persistent storage.
-        if redact(result, (token,)) != redact(result, (token,), hide_fields=False):
+        full_result = redact(result, (token,), hide_fields=False)
+        receipt_value = full_result
+        if simple:
+            receipt_value = {k: v for k, v in full_result.items()
+                             if k in {'root_password', 'password', 'wss_url', 'ticket'} and v}
+        if (simple and receipt_value) or (not simple and redact(result, (token,)) != full_result):
             nonce = secrets.token_hex(12)
             context.user_data["receipt"] = {
                 "nonce": nonce, "expires": time.monotonic() + 120,
-                "value": redact(result, (token,), hide_fields=False), "project": pid,
+                "value": receipt_value, "project": pid, 'simple': simple,
             }
             await update.effective_message.reply_text(
                 "پاسخ شامل اطلاعات محرمانه مثل گذرواژه یا کنسول است. برای دریافت پاسخ کامل در همین "
@@ -233,17 +351,26 @@ class Manager:
         actions = result.get("actions", [])
         if isinstance(result.get("action"), dict):
             actions = [result["action"]] + actions
-        rows = [[(f"پیگیری عملیات {action['id']}", f"action:{pid}:{action['id']}")]
+        rows = [[(f"پیگیری عملیات {action['id']}", f"{'check' if simple else 'action'}:{pid}:{action['id']}")]
                 for action in actions[:10] if isinstance(action, dict) and "id" in action]
         rows.append([("بازگشت به پروژه", f"p:{pid}")])
-        await update.effective_message.reply_text("ادامه:", reply_markup=keyboard(rows))
+        if simple:
+            server_id = (result.get('server') or {}).get('id')
+            if not server_id and op['path'].startswith('/servers/') and op['method'] != 'DELETE':
+                server_id = payload.get('path', {}).get('id')
+            if server_id:
+                rows.insert(0, [('🖥 نمایش سرور', f'srv:{pid}:{server_id}')])
+        if simple:
+            await self.show(update, f"پروژه: {name}\n{message}", rows)
+        else:
+            await update.effective_message.reply_text("ادامه:", reply_markup=keyboard(rows))
 
     async def servers(self, update, pid, page):
         name, token = await self.project(update, pid)
         result = await self.cloud.execute(token, BY_ID["list_servers"],
                                           {"query": {"page": page, "per_page": 10}})
-        rows = [[(f"{server['name']} · {server['status']}", f"srv:{pid}:{server['id']}")]
-                for server in result["servers"]]
+        rows = [[(f"{STATUS.get(server['status'], server['status'])} · {server['name']}", f"srv:{pid}:{server['id']}")]
+                for server in result["servers"] if server.get('status') != 'deleting']
         nav = []
         if page > 1:
             nav.append(("قبلی", f"servers:{pid}:{page-1}"))
@@ -251,9 +378,12 @@ class Manager:
             nav.append(("بعدی", f"servers:{pid}:{page+1}"))
         if nav:
             rows.append(nav)
-        rows.append([("بازگشت", f"p:{pid}")])
-        await update.effective_message.reply_text(f"سرورهای پروژه: {name} — صفحه {page}",
-                                                  reply_markup=keyboard(rows))
+        rows.append([('➕ ساخت سرور', f"new:{pid}:{OPERATIONS.index(BY_ID['create_server'])}")])
+        rows.append([('🔄 تازه‌سازی', f'servers:{pid}:{page}'), ("بازگشت", f"p:{pid}")])
+        text = f"🖥 سرورهای {name}\nسرور مورد نظر را انتخاب کن."
+        if not result['servers']:
+            text = f"🖥 {name}\nهنوز سروری در این پروژه نیست. از «ساخت سرور» شروع کن."
+        await self.show(update, text, rows)
 
     async def callback(self, update, context):
         if not self.authorized(update):
@@ -263,6 +393,9 @@ class Manager:
         await update.callback_query.answer()
         data = update.callback_query.data.split(":")
         kind = data[0]
+        if kind == 'easy':
+            await self.simple.callback(update, context, data)
+            return
         if kind == "flow":
             await self.forms.callback(update, context, data)
             return
@@ -281,7 +414,13 @@ class Manager:
                 raise ValueError("مهلت دریافت پاسخ محرمانه تمام شده است.")
             name, _ = await self.project(update, receipt["project"])
             await update.effective_message.reply_text(f"⚠ پاسخ کامل محرمانه — پروژه: {name}")
-            await self.send_json(update, receipt["value"], "sensitive-result.json")
+            if receipt.get('simple'):
+                names = {'root_password': 'گذرواژهٔ سرور', 'password': 'گذرواژه',
+                         'wss_url': 'آدرس کنسول', 'ticket': 'کلید اتصال کنسول'}
+                await update.effective_message.reply_text('\n'.join(
+                    f"{names.get(k, k)}: {v}" for k, v in receipt['value'].items()))
+            else:
+                await self.send_json(update, receipt["value"], "sensitive-result.json")
             return
         if kind == "yes":
             pending = consume_pending(context.user_data, data[1])
@@ -289,7 +428,8 @@ class Manager:
                 await asyncio.to_thread(self.store.remove, update.effective_user.id, pending.project)
                 await self.projects(update, context)
             else:
-                await self.execute(update, context, pending.project, BY_ID[pending.operation], pending.payload)
+                await self.execute(update, context, pending.project, BY_ID[pending.operation], pending.payload,
+                                   simple=pending.simple)
             return
         pid = data[1]
         name, token = await self.project(update, pid)
@@ -297,6 +437,21 @@ class Manager:
             context.user_data.clear()
         if kind == "p":
             await self.menu(update, pid)
+        elif kind in {'new', 'do'}:
+            await self.simple.start(update, context, pid, OPERATIONS[int(data[2])]['id'],
+                                    data[3] if kind == 'do' else None)
+        elif kind == 'restore':
+            await self.simple.start(update, context, pid, 'rebuild_server', image_id=int(data[2]))
+        elif kind == 'settings':
+            await self.show(update, f'⚙️ تنظیمات {name}', [
+                [('🧰 بخش پیشرفته', f'advanced:{pid}')],
+                [('حذف اتصال این پروژه از بات', f'forget:{pid}')], [('بازگشت', f'p:{pid}')]])
+        elif kind == 'advanced':
+            await self.show(update, f'🧰 ابزارهای پیشرفتهٔ {name}\nبرای کارهای روزمره از منوی اصلی استفاده کن.', [
+                [('شبکه، فایروال، دیسک، DNS و سایر منابع', f'resources:{pid}')],
+                [('تمام عملیات و ورودی تخصصی', f'tags:{pid}:0')], [('بازگشت', f'p:{pid}')]])
+        elif kind in {'images', 'ips', 'pic', 'ip', 'sub'}:
+            await self.simple_screen(update, context, pid, kind, data[2:])
         elif kind == "resources":
             rows = [[(label, f"res:{pid}:{i}:1")] for i, (_, label) in enumerate(COLLECTIONS)]
             rows.append([("بازگشت", f"p:{pid}")])
@@ -323,17 +478,14 @@ class Manager:
         elif kind == "srv":
             server = (await self.cloud.execute(token, BY_ID["get_server"],
                                                {"path": {"id": int(data[2])}}))["server"]
-            ip = server.get("public_net", {}).get("ipv4") or {}
-            await update.effective_message.reply_text(
-                f"پروژه: {name}\n{server['name']} — {server['id']}\n"
-                f"وضعیت: {server['status']}\nIPv4: {ip.get('ip', '—')}",
-                reply_markup=keyboard([
-                    [(label, f"quick:{pid}:{data[2]}:{action}") for label, action in pair]
-                    for pair in [[("روشن", "on"), ("خاموش نرم", "stop")],
-                                 [("ری‌استارت", "reboot"), ("قطع برق", "off")],
-                                 [("اسنپ‌شات", "snap"), ("حذف سرور", "del")]]
-                    ] + [[("بکاپ، Rescue، تغییر مدل و سایر عملیات", f"item:{pid}:0:{data[2]}:0")],
-                         [("بازگشت", f"servers:{pid}:1")]]))
+            def action(label, op):
+                return (label, f"do:{pid}:{OPERATIONS.index(BY_ID[op])}:{server['id']}")
+            await self.show(update, server_card(server, name), [
+                [action('▶️ روشن کردن', 'poweron_server'), action('⏹ خاموش کردن', 'shutdown_server')],
+                [action('🔄 ری‌استارت', 'reboot_server')],
+                [('📸 اسنپ‌شات و بکاپ', f"sub:{pid}:{server['id']}:backup")],
+                [('⚙️ تغییرات سرور', f"sub:{pid}:{server['id']}:settings")],
+                [('🔄 تازه‌سازی', f"srv:{pid}:{server['id']}"), ('بازگشت', f'servers:{pid}:1')]])
         elif kind == "quick":
             operation, body = {
                 "on": ("poweron_server", None), "stop": ("shutdown_server", None),
@@ -345,8 +497,8 @@ class Manager:
             if body is not None:
                 payload["body"] = body
             await self.preview(update, context, pid, BY_ID[operation], payload)
-        elif kind == "action":
-            await self.execute(update, context, pid, BY_ID["get_action"], {"path": {"id": int(data[2])}})
+        elif kind in {"action", "check"}:
+            await self.execute(update, context, pid, BY_ID["get_action"], {"path": {"id": int(data[2])}}, simple=kind == 'check')
         elif kind == "tags":
             page = int(data[2])
             rows = [[(LABELS.get(tag, tag), f"tag:{pid}:{i}:0")]
@@ -387,6 +539,9 @@ class Manager:
             await update.effective_message.reply_text("از /projects شروع کنید.")
             return
         text = supplied_text if supplied_text is not None else update.effective_message.text.strip()
+        if state['kind'] == 'simple':
+            await self.simple.text(update, context, text)
+            return
         if state["kind"] == "form":
             try:
                 await update.effective_message.delete()
@@ -468,6 +623,11 @@ class Manager:
         if isinstance(update, Update) and self.authorized(update):
             message = (str(context.error) if isinstance(context.error, (ValueError, CloudError))
                        else "خطای داخلی؛ عملیات خودکار تکرار نشد. وضعیت منبع را بررسی کنید.")
+            if isinstance(context.error, CloudError):
+                if 'not_found' in message:
+                    message = 'این منبع دیگر در پروژه پیدا نشد. به فهرست برگرد و «تازه‌سازی» را بزن.'
+                elif 'resource_unavailable' in message:
+                    message = 'ظرفیت پلن انتخاب‌شده تمام شده است. دوباره از فهرست پلن‌های موجود انتخاب کن.'
             # ValueErrors from third-party libraries may include input; only our handlers produce
             # expected ValueErrors in normal operation. Other failures stay generic.
             await update.effective_message.reply_text(message[:3000])

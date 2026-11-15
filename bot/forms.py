@@ -7,6 +7,7 @@ import time
 from jsonschema import Draft202012Validator
 
 from .api import BY_ID, CATALOG, OPERATIONS, prepare, schema_for
+from .availability import all_items, available_plan
 
 SOURCES = {
     "server": ("servers", "id"), "server_type": ("server_types", "name"),
@@ -314,9 +315,17 @@ class Forms:
         state = self.state(context)
         collection, value_key = source_for(state["cursor"])
         name, token = await self.manager.project(update, state["pid"])
-        result = await self.manager.cloud.execute(token, BY_ID['list_' + collection],
-                                                   {"query": {"page": page, "per_page": 8}})
-        items = result[collection]
+        if collection == 'server_types':
+            plans = await all_items(self.manager.cloud, token, BY_ID['list_server_types'], 'server_types')
+            location = state['payload'].get('body', {}).get('location')
+            available = [p for p in plans if available_plan(p, location)]
+            items = available[(page-1)*8:page*8]
+            has_next = page*8 < len(available)
+        else:
+            result = await self.manager.cloud.execute(token, BY_ID['list_' + collection],
+                                                       {"query": {"page": page, "per_page": 8}})
+            items = result[collection]
+            has_next = result.get('meta', {}).get('pagination', {}).get('next_page')
         state["nonce"] = secrets.token_hex(8)
         state["pick_values"] = [item[value_key] for item in items]
         prefix = f"flow:{state['nonce']}:"
@@ -329,7 +338,7 @@ class Forms:
         nav = []
         if page > 1:
             nav.append(("قبلی", prefix + f"pick:{page-1}"))
-        if result.get('meta', {}).get('pagination', {}).get('next_page'):
+        if has_next:
             nav.append(("بعدی", prefix + f"pick:{page+1}"))
         if nav:
             rows.append(nav)
