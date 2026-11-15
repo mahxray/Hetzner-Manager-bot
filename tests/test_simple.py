@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
+from telegram.error import BadRequest
 
 from bot.api import BY_ID, OPERATIONS
 from bot.availability import all_items, available_plan
@@ -215,6 +216,19 @@ class SimpleFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('سرورهای من', rendered)
         markup = event.effective_message.reply_text.call_args.kwargs['reply_markup']
         self.assertIn('اسنپ‌شات', ' '.join(b.text for row in markup.inline_keyboard for b in row))
+
+    async def test_refreshing_an_unchanged_screen_does_not_send_duplicates(self):
+        event = update(callback=f'p:{self.pid}')
+        event.effective_message.edit_text = AsyncMock(side_effect=BadRequest('Message is not modified'))
+        await self.manager.menu(event, self.pid)
+        event.effective_message.reply_text.assert_not_awaited()
+
+    async def test_screen_uses_edit_for_bot_callback_messages(self):
+        event = update(callback=f'p:{self.pid}')
+        event.effective_message.edit_text = AsyncMock()
+        await self.manager.menu(event, self.pid)
+        event.effective_message.edit_text.assert_awaited_once()
+        event.effective_message.reply_text.assert_not_awaited()
 
     async def test_other_owner_cannot_start_wizard(self):
         with self.assertRaises(ValueError):

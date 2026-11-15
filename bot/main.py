@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import httpx
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Keyboard, Update
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
 from .api import BY_ID, OPERATIONS, Cloud, CloudError, prepare, redact, sample, schema_for
@@ -86,6 +86,9 @@ class Manager:
             try:
                 await message.edit_text(text, reply_markup=keyboard(rows))
                 return
+            except BadRequest as error:
+                if 'message is not modified' in str(error).lower():
+                    return
             except TelegramError:
                 pass
         await message.reply_text(text, reply_markup=keyboard(rows))
