@@ -17,8 +17,16 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 
 from .api import BY_ID, OPERATIONS, Cloud, CloudError, prepare, redact, sample, schema_for
 from .storage import Store
+from .forms import Forms, title
 
 TAGS = sorted({op["tag"] for op in OPERATIONS})
+COLLECTIONS = [
+    ("servers", "سرورها"), ("images", "بکاپ‌ها، اسنپ‌شات‌ها و ایمیج‌ها"),
+    ("networks", "شبکه‌ها"), ("firewalls", "فایروال‌ها"), ("volumes", "دیسک‌ها"),
+    ("floating_ips", "Floating IP"), ("primary_ips", "Primary IP"),
+    ("ssh_keys", "کلیدهای SSH"), ("load_balancers", "لودبالانسرها"),
+    ("certificates", "گواهی‌ها"), ("placement_groups", "گروه‌های استقرار"), ("zones", "دامنه‌های DNS"),
+]
 LABELS = {
     "Servers": "سرورها", "Server Actions": "عملیات سرور", "Images": "ایمیج و اسنپ‌شات",
     "Networks": "شبکه‌ها", "Firewalls": "فایروال‌ها", "Volumes": "دیسک‌ها",
@@ -63,8 +71,11 @@ def expire_state(state, now):
 
 
 class Manager:
+    keyboard = staticmethod(keyboard)
+
     def __init__(self, store, cloud, allowed):
         self.store, self.cloud, self.allowed = store, cloud, allowed
+        self.forms = Forms(self)
 
     def authorized(self, update):
         return (update.effective_user is not None and update.effective_chat is not None
@@ -97,8 +108,9 @@ class Manager:
             return
         await update.effective_message.reply_text(
             "/projects — پروژه‌ها\n/add — افزودن پروژه\n/cancel — لغو ورودی و تأیید\n"
-            "در پروژه: سرورها برای مدیریت سریع؛ تمام عملیات برای امکانات پیشرفتهٔ API.\n"
-            "ورودی پیشرفته JSON است؛ نمونه و ساختار هر عملیات قابل دریافت است.\n"
+            "در پروژه: منابع برای انتخاب و مدیریت؛ فرم مرحله‌ای برای ورود تنظیمات با دکمه.\n"
+            "علامت * یعنی فیلد الزامی. بخش‌های تنظیمات و فهرست‌ها را باز و ویرایش کنید؛ "
+            "در پایان «بررسی و ادامه» را بزنید. حالت پیشرفتهٔ JSON هم در دسترس است.\n"
             "هر تغییر نیازمند تأیید ۲ دقیقه‌ای است. پاسخ running به معنی پایان عملیات نیست؛ "
             "دکمهٔ پیگیری را بزنید. پاسخ محرمانه فقط با درخواست جدا نمایش داده می‌شود.")
 
@@ -112,11 +124,60 @@ class Manager:
     async def menu(self, update, pid):
         name, _ = await self.project(update, pid)
         await update.effective_message.reply_text(f"پروژه: {name}", reply_markup=keyboard([
-            [("🖥 سرورها", f"servers:{pid}:1"), ("➕ ساخت سرور", f"op:{pid}:{OPERATIONS.index(BY_ID['create_server'])}")],
-            [("🧰 تمام عملیات Cloud", f"tags:{pid}:0")],
+            [("🖥 سرورها", f"servers:{pid}:1"), ("➕ ساخت سرور", f"form:{pid}:{OPERATIONS.index(BY_ID['create_server'])}")],
+            [("📦 مدیریت همهٔ منابع", f"resources:{pid}")],
+            [("🧰 تمام عملیات و فرم‌ها", f"tags:{pid}:0")],
             [("حذف اتصال پروژه از بات", f"forget:{pid}")],
             [("پروژه‌ها", "projects")],
         ]))
+
+    async def resources(self, update, pid, collection_index, page):
+        name, token = await self.project(update, pid)
+        collection, label = COLLECTIONS[collection_index]
+        op = next(o for o in OPERATIONS if o['path'] == '/' + collection and o['method'] == 'GET')
+        result = await self.cloud.execute(token, op, {"query": {"page": page, "per_page": 8}})
+        rows = [[(f"{resource.get('name') or resource.get('description') or resource.get('ip') or resource['id']} · {resource['id']}",
+                  f"item:{pid}:{collection_index}:{resource['id']}:0")]
+                for resource in result[collection]]
+        nav = []
+        if page > 1:
+            nav.append(("قبلی", f"res:{pid}:{collection_index}:{page-1}"))
+        if result.get('meta', {}).get('pagination', {}).get('next_page'):
+            nav.append(("بعدی", f"res:{pid}:{collection_index}:{page+1}"))
+        if nav:
+            rows.append(nav)
+        create = next((i for i, o in enumerate(OPERATIONS)
+                       if o['path'] == '/' + collection and o['method'] == 'POST'), None)
+        if create is not None:
+            rows.append([("➕ ساخت / افزودن", f"form:{pid}:{create}")])
+        rows.append([("منابع", f"resources:{pid}")])
+        await update.effective_message.reply_text(f"پروژه: {name}\n{label} — صفحه {page}", reply_markup=keyboard(rows))
+
+    async def resource_item(self, update, pid, collection_index, resource_id, page):
+        name, token = await self.project(update, pid)
+        collection, label = COLLECTIONS[collection_index]
+        base = '/' + collection + '/'
+        operations = [(i, o) for i, o in enumerate(OPERATIONS)
+                      if o['path'].startswith(base + '{') and not o['path'].startswith(base + 'actions/')]
+        get = next(o for _, o in operations if o['method'] == 'GET' and o['path'].count('/') == 2)
+        key = next(p['name'] for p in get['parameters'] if p['in'] == 'path')
+        parameter = resource_id if key == 'id_or_name' else int(resource_id)
+        if page == 0:
+            result = await self.cloud.execute(token, get, {"path": {key: parameter}})
+            await self.send_json(update, redact(result, (token,)))
+        # Include all operations on the selected resource, including DNS RRSet subresources.
+        rows = [[(title(o), f"edit:{pid}:{i}:{resource_id}")]
+                for i, o in operations[page*8:(page+1)*8]]
+        nav = []
+        if page:
+            nav.append(("قبلی", f"item:{pid}:{collection_index}:{resource_id}:{page-1}"))
+        if (page+1)*8 < len(operations):
+            nav.append(("بعدی", f"item:{pid}:{collection_index}:{resource_id}:{page+1}"))
+        if nav:
+            rows.append(nav)
+        rows.append([("بازگشت به فهرست", f"res:{pid}:{collection_index}:1")])
+        await update.effective_message.reply_text(f"پروژه: {name}\n{label} — شناسه {resource_id}\nعملیات:",
+                                                  reply_markup=keyboard(rows))
 
     async def ask_operation(self, update, context, pid, index):
         op = OPERATIONS[index]
@@ -202,6 +263,9 @@ class Manager:
         await update.callback_query.answer()
         data = update.callback_query.data.split(":")
         kind = data[0]
+        if kind == "flow":
+            await self.forms.callback(update, context, data)
+            return
         if kind in {"projects", "cancel"}:
             await self.projects(update, context)
             return
@@ -233,6 +297,21 @@ class Manager:
             context.user_data.clear()
         if kind == "p":
             await self.menu(update, pid)
+        elif kind == "resources":
+            rows = [[(label, f"res:{pid}:{i}:1")] for i, (_, label) in enumerate(COLLECTIONS)]
+            rows.append([("بازگشت", f"p:{pid}")])
+            await update.effective_message.reply_text(f"پروژه: {name} — منابع", reply_markup=keyboard(rows))
+        elif kind == "res":
+            await self.resources(update, pid, int(data[2]), int(data[3]))
+        elif kind == "item":
+            await self.resource_item(update, pid, int(data[2]), data[3], int(data[4]))
+        elif kind in {"form", "edit"}:
+            index = int(data[2])
+            path = None
+            if kind == "edit":
+                key = OPERATIONS[index]['path'].split('/{', 1)[1].split('}', 1)[0]
+                path = {key: data[3] if key == 'id_or_name' else int(data[3])}
+            await self.forms.start(update, context, pid, index, path)
         elif kind == "forget":
             nonce = secrets.token_hex(12)
             context.user_data["pending"] = Pending(nonce, pid, "forget", {}, time.monotonic() + 120)
@@ -253,7 +332,8 @@ class Manager:
                     for pair in [[("روشن", "on"), ("خاموش نرم", "stop")],
                                  [("ری‌استارت", "reboot"), ("قطع برق", "off")],
                                  [("اسنپ‌شات", "snap"), ("حذف سرور", "del")]]
-                    ] + [[("بازگشت", f"servers:{pid}:1")]]))
+                    ] + [[("بکاپ، Rescue، تغییر مدل و سایر عملیات", f"item:{pid}:0:{data[2]}:0")],
+                         [("بازگشت", f"servers:{pid}:1")]]))
         elif kind == "quick":
             operation, body = {
                 "on": ("poweron_server", None), "stop": ("shutdown_server", None),
@@ -283,7 +363,7 @@ class Manager:
         elif kind == "tag":
             tag_index, page = int(data[2]), int(data[3])
             ops = [(i, op) for i, op in enumerate(OPERATIONS) if op["tag"] == TAGS[tag_index]]
-            rows = [[(f"{op['method']} · {op['summary']}", f"op:{pid}:{i}")]
+            rows = [[(title(op), f"form:{pid}:{i}"), ("JSON", f"op:{pid}:{i}")]
                     for i, op in ops[page*8:(page+1)*8]]
             nav = []
             if page:
@@ -307,6 +387,14 @@ class Manager:
             await update.effective_message.reply_text("از /projects شروع کنید.")
             return
         text = supplied_text if supplied_text is not None else update.effective_message.text.strip()
+        if state["kind"] == "form":
+            try:
+                await update.effective_message.delete()
+            except TelegramError:
+                await update.effective_message.reply_text("اگر ورودی محرمانه است، پیام را دستی حذف کنید.")
+            form_text = supplied_text if supplied_text is not None else update.effective_message.text
+            await self.forms.text(update, context, form_text)
+            return
         if state["kind"] == "name":
             if not text or len(text) > 60:
                 raise ValueError("نام پروژه باید بین ۱ تا ۶۰ حرف باشد.")
@@ -358,11 +446,12 @@ class Manager:
         if not self.authorized(update):
             return
         state = context.user_data.get("input", {})
-        if state.get("kind") != "operation":
-            raise ValueError("اول عملیات مورد نظر را انتخاب کنید؛ سپس فایل JSON بفرستید.")
+        if state.get("kind") != "operation" and not (
+                state.get("kind") == "form" and self.forms.accepts_document(context)):
+            raise ValueError("اول عملیات JSON یا یک فیلد متنی فرم را انتخاب کنید؛ سپس فایل بفرستید.")
         document = update.effective_message.document
         if not document.file_size or document.file_size > 512 * 1024:
-            raise ValueError("حداکثر حجم فایل JSON برابر ۵۱۲ کیلوبایت است.")
+            raise ValueError("حداکثر حجم فایل ورودی برابر ۵۱۲ کیلوبایت است.")
         file = await document.get_file()
         raw = await file.download_as_bytearray()
         if len(raw) > 512 * 1024:
@@ -370,7 +459,7 @@ class Manager:
         try:
             value = raw.decode("utf-8-sig")
         except UnicodeDecodeError:
-            raise ValueError("فایل باید JSON با کدگذاری UTF-8 باشد.") from None
+            raise ValueError("فایل باید کدگذاری UTF-8 داشته باشد.") from None
         await self.text(update, context, supplied_text=value)
 
     async def error(self, update, context):

@@ -20,4 +20,6 @@ jobs:
       - run: python -m compileall -q bot scripts
       - run: bash -n install.sh
       - run: bash tests/test_installer.sh
+      - run: bash -n scripts/mhx.sh
+      - run: bash tests/test_update.sh
       - run: docker build -t hetzner-manager-test .

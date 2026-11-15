@@ -71,7 +71,7 @@ def prepare(op, payload):
         raise ValueError(f"ورودی نامعتبر در {field}؛ قانون: {errors[0].validator}")
     path = op["path"]
     for name, value in payload.get("path", {}).items():
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", str(value)):
+        if str(value) in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.*@:-]+", str(value)):
             raise ValueError("شناسهٔ مسیر نامعتبر است.")
         path = path.replace("{" + name + "}", quote(str(value), safe=""))
     if "{" in path:

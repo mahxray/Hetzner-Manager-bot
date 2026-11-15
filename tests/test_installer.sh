@@ -83,4 +83,17 @@ fi
   ensure_docker
   [[ "${DOCKER_COMMAND[*]}" == 'run_root docker' ]]
 )
+# CLI wrapper keeps a path with spaces intact and never overwrites an unrelated command.
+(
+  run_root() { "$@"; }
+  destination="$work/bin/mhx"
+  install_cli "$destination"
+  bash "$destination" --help | grep -q 'mhx update'
+  install_cli "$destination"
+  printf '#!/bin/sh\necho unrelated\n' > "$destination"
+  if install_cli "$destination" 2>/dev/null; then
+    echo 'Overwrote unrelated command' >&2; exit 1
+  fi
+  grep -q unrelated "$destination"
+)
 echo 'Installer checks passed.'

@@ -69,6 +69,19 @@ ensure_docker() {
   "${DOCKER_COMMAND[@]}" info >/dev/null
 }
 
+install_cli() {
+  local destination="${1:-/usr/local/bin/mhx}" script
+  script="$(pwd -P)/scripts/mhx.sh"
+  if [[ -e "$destination" ]] && ! grep -qs '^# Hetzner Manager Bot CLI$' "$destination"; then
+    echo "An unrelated command already exists at $destination; refusing to overwrite it." >&2
+    return 1
+  fi
+  run_root install -d -m 0755 "$(dirname -- "$destination")"
+  printf '#!/usr/bin/env bash\n# Hetzner Manager Bot CLI\nexec bash %q "$@"\n' "$script" \
+    | run_root tee "$destination" >/dev/null
+  run_root chmod 0755 "$destination"
+}
+
 main() {
   cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
   DOCKER_COMMAND=(docker)
@@ -83,7 +96,9 @@ main() {
   fi
   chmod 600 .env
   "${DOCKER_COMMAND[@]}" compose up -d --build
+  install_cli
   echo 'Started. In Telegram open your bot and send /start.'
+  echo 'Next update: mhx update'
   echo 'Logs: docker compose logs --tail=50 bot (use sudo if required).'
 }
 
