@@ -1,4 +1,5 @@
 """Schema-driven conversation forms; input stays bound to one user, project and operation."""
+from .i18n import tr
 import copy
 import math
 import secrets
@@ -87,20 +88,20 @@ TITLES = {
 
 def title(operation):
     if operation["id"] in TITLES:
-        return TITLES[operation["id"]]
-    nouns = {"server": "سرور", "servers": "سرورها", "network": "شبکه", "networks": "شبکه‌ها",
-             "volume": "دیسک", "volumes": "دیسک‌ها", "firewall": "فایروال", "firewalls": "فایروال‌ها",
-             "image": "ایمیج", "images": "ایمیج‌ها", "zone": "دامنه", "zones": "دامنه‌ها",
-             "zone_rrset": "رکورد DNS", "zone_rrsets": "رکوردهای DNS",
-             "floating_ip": "Floating IP", "floating_ips": "Floating IPها",
-             "primary_ip": "Primary IP", "primary_ips": "Primary IPها",
-             "ssh_key": "کلید SSH", "ssh_keys": "کلیدهای SSH",
-             "certificate": "گواهی", "certificates": "گواهی‌ها",
-             "placement_group": "گروه استقرار", "placement_groups": "گروه‌های استقرار",
-             "load_balancer": "لودبالانسر", "load_balancers": "لودبالانسرها"}
+        return tr(TITLES[operation['id']])
+    nouns = {"server": tr('سرور'), "servers": tr('سرورها'), "network": tr('شبکه'), "networks": tr('شبکه\u200cها'),
+             "volume": tr('دیسک'), "volumes": tr('دیسک\u200cها'), "firewall": tr('فایروال'), "firewalls": tr('فایروال\u200cها'),
+             "image": tr('ایمیج'), "images": tr('ایمیج\u200cها'), "zone": tr('دامنه'), "zones": tr('دامنه\u200cها'),
+             "zone_rrset": tr('رکورد DNS'), "zone_rrsets": tr('رکوردهای DNS'),
+             "floating_ip": "Floating IP", "floating_ips": tr('Floating IPها'),
+             "primary_ip": "Primary IP", "primary_ips": tr('Primary IPها'),
+             "ssh_key": tr('کلید SSH'), "ssh_keys": tr('کلیدهای SSH'),
+             "certificate": tr('گواهی'), "certificates": tr('گواهی\u200cها'),
+             "placement_group": tr('گروه استقرار'), "placement_groups": tr('گروه\u200cهای استقرار'),
+             "load_balancer": tr('لودبالانسر'), "load_balancers": tr('لودبالانسرها')}
     verb, _, noun = operation["id"].partition('_')
-    verbs = {"get": "مشاهدهٔ", "list": "فهرست", "delete": "حذف", "update": "ویرایش",
-             "create": "ساخت", "unassign": "برداشتن تخصیص"}
+    verbs = {"get": tr('مشاهدهٔ'), "list": tr('فهرست'), "delete": tr('حذف'), "update": tr('ویرایش'),
+             "create": tr('ساخت'), "unassign": tr('برداشتن تخصیص')}
     if verb in verbs and noun in nouns:
         return verbs[verb] + ' ' + nouns[noun]
     return operation["summary"]
@@ -115,8 +116,8 @@ def resolve(schema):
         schema = {**resolve(reference), **schema}
     for part in schema.pop("allOf", []):
         part = resolve(part)
-        schema["properties"] = {**schema.get("properties", {}), **part.get("properties", {})}
-        schema["required"] = list(dict.fromkeys(schema.get("required", []) + part.get("required", [])))
+        schema['properties'] = {**schema.get("properties", {}), **part.get("properties", {})}
+        schema['required'] = list(dict.fromkeys(schema.get("required", []) + part.get("required", [])))
         schema = {**part, **schema}
     return schema
 
@@ -152,7 +153,7 @@ def node_schema(state, path=None):
             if choice is None:
                 if depth == len(path):
                     return schema
-                raise ValueError("ابتدا نوع مقدار را انتخاب کنید.")
+                raise ValueError(tr('ابتدا نوع مقدار را انتخاب کنید.'))
             schema = resolve({**{k: v for k, v in schema.items() if k not in {"oneOf", "anyOf"}},
                               **union[choice]})
         if depth == len(path):
@@ -165,7 +166,7 @@ def node_schema(state, path=None):
             if schema is True:
                 schema = {"type": "string"}
             if not isinstance(schema, dict):
-                raise ValueError("این فیلد قابل ویرایش نیست.")
+                raise ValueError(tr('این فیلد قابل ویرایش نیست.'))
 
 
 def scalar(text, schema):
@@ -186,7 +187,7 @@ def scalar(text, schema):
         else:
             value = text
     except ValueError:
-        raise ValueError("نوع مقدار درست نیست؛ مطابق راهنمای فیلد وارد کنید.") from None
+        raise ValueError(tr('نوع مقدار درست نیست؛ مطابق راهنمای فیلد وارد کنید.')) from None
     validate(value, schema)
     return value
 
@@ -196,9 +197,9 @@ def validate(value, schema):
     error = next(Draft202012Validator(schema).iter_errors(value), None)
     if error:
         if error.validator == "required" and isinstance(value, dict):
-            missing = [FIELDS.get(x, x) for x in error.validator_value if x not in value]
-            raise ValueError("فیلدهای الزامی را تکمیل کنید: " + "، ".join(missing))
-        raise ValueError(f"مقدار با قانون {error.validator} سازگار نیست؛ راهنمای فیلد را بررسی کنید.")
+            missing = [tr(FIELDS.get(x, x)) for x in error.validator_value if x not in value]
+            raise ValueError(tr('فیلدهای الزامی را تکمیل کنید: ') + tr('، ').join(missing))
+        raise ValueError(tr('مقدار با قانون {0} سازگار نیست؛ راهنمای فیلد را بررسی کنید.', error.validator))
 
 
 def source_for(cursor):
@@ -214,17 +215,25 @@ class Forms:
 
     async def start(self, update, context, pid, index, path=None):
         await self.manager.project(update, pid)
-        context.user_data.clear()
+        self.manager.reset(context)
         payload = {"path": path} if path else {}
+        nav = context.user_data.get('nav')
+        if nav and nav['pid'] == pid:
+            server_id = nav['server']
+            operation = OPERATIONS[index]['id']
+            if operation == 'remove_firewall_from_resources':
+                payload['body'] = {'remove_from': [{'type': 'server', 'server': {'id': server_id}}]}
+            elif operation == 'remove_load_balancer_target':
+                payload['body'] = {'type': 'server', 'server': {'id': server_id}}
         state = {"kind": "form", "pid": pid, "index": index, "payload": payload,
                  "cursor": [], "variants": {}, "expires": time.monotonic() + 900, "page": 0}
-        context.user_data["input"] = state
+        context.user_data['input'] = state
         await self.render(update, context)
 
     def state(self, context):
         state = context.user_data.get("input", {})
         if state.get("kind") != "form" or state["expires"] < time.monotonic():
-            raise ValueError("فرم منقضی شده؛ عملیات را دوباره انتخاب کنید.")
+            raise ValueError(tr('فرم منقضی شده؛ عملیات را دوباره انتخاب کنید.'))
         return state
 
     def accepts_document(self, context):
@@ -237,17 +246,17 @@ class Forms:
         name, _ = await self.manager.project(update, state["pid"])
         schema = node_schema(state)
         cursor = state["cursor"]
-        state["nonce"] = secrets.token_hex(8)
-        state["waiting"] = None
+        state['nonce'] = secrets.token_hex(8)
+        state['waiting'] = None
         prefix = f"flow:{state['nonce']}:"
         rows = []
         union = schema.get("oneOf", schema.get("anyOf"))
-        heading = f"پروژه: {name}\n{title(OPERATIONS[state['index']])}\n"
-        heading += " ← ".join(FIELDS.get(str(x), str(x)) for x in cursor) or "فرم عملیات"
+        heading = tr('پروژه: {0}\n{1}\n', name, title(OPERATIONS[state['index']]))
+        heading += ' ← '.join((tr(FIELDS.get(str(x), str(x))) for x in cursor)) or tr('فرم عملیات')
         if union:
-            rows = [[(f"گزینه {i+1}: {part.get('title', kind(resolve(part)))}", prefix + f"variant:{i}")]
+            rows = [[(tr('گزینه {0}: {1}', i + 1, part.get('title', kind(resolve(part)))), prefix + f"variant:{i}")]
                     for i, part in enumerate(union)]
-            heading += "\nنوع ورودی را انتخاب کنید."
+            heading += tr('\nنوع ورودی را انتخاب کنید.')
         elif kind(schema) in {"object", "array"}:
             try:
                 current = read(state["payload"], cursor)
@@ -263,51 +272,54 @@ class Forms:
                 if not cursor:
                     keys = [k for k in keys if schema["properties"][k].get("properties")
                             or k == "body"]
-                keys += [k for k in current if k not in keys]
-                state["keys"] = keys
+                    if state['payload'].get('path') and context.user_data.get('nav'):
+                        keys = [k for k in keys if k != 'path']
+                keys += [k for k in current if k not in keys
+                         and not (not cursor and k == 'path' and context.user_data.get('nav'))]
+                state['keys'] = keys
                 for i in range(state["page"]*8, min(len(keys), (state["page"]+1)*8)):
                     key = keys[i]
                     status = "✓" if key in current else ("*" if key in schema.get("required", []) else "○")
-                    rows.append([(f"{status} {FIELDS.get(key, key)}", prefix + f"field:{i}")])
+                    rows.append([(f'{status} {tr(FIELDS.get(key, key))}', prefix + f'field:{i}')])
                 if isinstance(schema.get("additionalProperties"), dict) or schema.get("additionalProperties") is True:
-                    rows.append([("➕ کلید دلخواه", prefix + "map")])
-                heading += "\n* الزامی · ○ اختیاری · ✓ واردشده؛ فیلد را انتخاب کنید."
+                    rows.append([(tr('➕ کلید دلخواه'), prefix + 'map')])
+                heading += tr('\n* الزامی · ○ اختیاری · ✓ واردشده؛ فیلد را انتخاب کنید.')
             else:
                 keys = list(range(len(current)))
-                state["keys"] = keys
+                state['keys'] = keys
                 for i in keys[state["page"]*8:(state["page"]+1)*8]:
-                    rows.append([(f"ویرایش مورد {i+1}", prefix + f"field:{i}")])
-                rows.append([("➕ افزودن مورد", prefix + "append")])
-                heading += f"\nتعداد موارد: {len(current)}"
+                    rows.append([(tr('ویرایش مورد {0}', i + 1), prefix + f'field:{i}')])
+                rows.append([(tr('➕ افزودن مورد'), prefix + 'append')])
+                heading += tr('\nتعداد موارد: {0}', len(current))
             nav = []
             if state["page"]:
-                nav.append(("قبلی", prefix + "page:-1"))
+                nav.append((tr('قبلی'), prefix + 'page:-1'))
             if (state["page"]+1)*8 < len(keys):
-                nav.append(("بعدی", prefix + "page:1"))
+                nav.append((tr('بعدی'), prefix + 'page:1'))
             if nav:
                 rows.append(nav)
-            rows.append([("ثبت این بخش / بازگشت" if cursor else "✅ بررسی و ادامه", prefix + "done")])
+            rows.append([(tr('ثبت این بخش / بازگشت') if cursor else tr('✅ بررسی و ادامه'), prefix + 'done')])
         else:
             options = schema.get("enum")
             if options is None and kind(schema) == "boolean":
                 options = [True, False]
-            state["options"] = options or []
+            state['options'] = options or []
             if options:
                 rows += [[(str(value), prefix + f"value:{i}")] for i, value in enumerate(options)]
-                heading += "\nمقدار را انتخاب کنید یا تایپ کنید."
+                heading += tr('\nمقدار را انتخاب کنید یا تایپ کنید.')
             else:
-                heading += f"\nمقدار را بفرستید. نوع: {kind(schema)}"
+                heading += tr('\nمقدار را بفرستید. نوع: {0}', kind(schema))
                 if kind(schema) == 'string':
-                    heading += "\nبرای متن طولانی می‌توانید فایل UTF-8 بفرستید."
+                    heading += tr('\nبرای متن طولانی می\u200cتوانید فایل UTF-8 بفرستید.')
             if source_for(cursor):
-                rows.append([("📋 انتخاب از فهرست واقعی پروژه", prefix + "pick:1")])
+                rows.append([(tr('📋 انتخاب از فهرست واقعی پروژه'), prefix + 'pick:1')])
             description = schema.get("description", "")[:700]
             if description:
-                heading += "\nراهنمای هتزنر: " + description
-            state["waiting"] = "scalar"
+                heading += tr('\nراهنمای هتزنر: ') + description
+            state['waiting'] = "scalar"
         if cursor:
-            rows.append([("حذف این مقدار / صرف‌نظر", prefix + "remove"), ("بازگشت", prefix + "back")])
-        rows.append([("لغو", "cancel")])
+            rows.append([(tr('حذف این مقدار / صرف\u200cنظر'), prefix + 'remove'), (tr('بازگشت'), prefix + 'back')])
+        rows.append([(tr('لغو'), 'cancel')])
         await update.effective_message.reply_text(heading[:3500], reply_markup=keyboard(rows))
 
     async def picker(self, update, context, page):
@@ -326,8 +338,8 @@ class Forms:
                                                        {"query": {"page": page, "per_page": 8}})
             items = result[collection]
             has_next = result.get('meta', {}).get('pagination', {}).get('next_page')
-        state["nonce"] = secrets.token_hex(8)
-        state["pick_values"] = [item[value_key] for item in items]
+        state['nonce'] = secrets.token_hex(8)
+        state['pick_values'] = [item[value_key] for item in items]
         prefix = f"flow:{state['nonce']}:"
         rows = []
         for i, item in enumerate(items):
@@ -337,20 +349,18 @@ class Forms:
             rows.append([(label, prefix + f"choose:{i}")])
         nav = []
         if page > 1:
-            nav.append(("قبلی", prefix + f"pick:{page-1}"))
+            nav.append((tr('قبلی'), prefix + f'pick:{page - 1}'))
         if has_next:
-            nav.append(("بعدی", prefix + f"pick:{page+1}"))
+            nav.append((tr('بعدی'), prefix + f'pick:{page + 1}'))
         if nav:
             rows.append(nav)
-        rows.append([("ورود دستی / بازگشت به فیلد", prefix + "manual")])
-        await update.effective_message.reply_text(
-            f"پروژه: {name}\nانتخاب {FIELDS.get(str(state['cursor'][-1]), collection)} — صفحه {page}\n"
-            "سازگاری مدل، موقعیت و معماری و هزینهٔ منبع را پیش از تأیید بررسی کنید.", reply_markup=keyboard(rows))
+        rows.append([(tr('ورود دستی / بازگشت به فیلد'), prefix + 'manual')])
+        await update.effective_message.reply_text(tr('پروژه: {0}\nانتخاب {1} — صفحه {2}\nسازگاری مدل، موقعیت و معماری و هزینهٔ منبع را پیش از تأیید بررسی کنید.', name, tr(FIELDS.get(str(state['cursor'][-1]), collection)), page), reply_markup=keyboard(rows))
 
     async def callback(self, update, context, parts):
         state = self.state(context)
         if not secrets.compare_digest(parts[1], state["nonce"]):
-            raise ValueError("این دکمه قدیمی است؛ از آخرین پیام فرم استفاده کنید.")
+            raise ValueError(tr('این دکمه قدیمی است؛ از آخرین پیام فرم استفاده کنید.'))
         await self.manager.project(update, state["pid"])
         action = parts[2]
         cursor = state["cursor"]
@@ -366,18 +376,18 @@ class Forms:
             validate(value, schema)
             write(state["payload"], cursor, value)
             cursor.pop()
-            state["page"] = 0
+            state['page'] = 0
         elif action == "manual":
             pass
         elif action == "field":
             key = state["keys"][int(parts[3])]
             cursor.append(key)
-            state["page"] = 0
+            state['page'] = 0
         elif action == "append":
             cursor.append(len(read(state["payload"], cursor)))
-            state["page"] = 0
+            state['page'] = 0
         elif action == "variant":
-            state["variants"][tuple(cursor)] = int(parts[3])
+            state['variants'][tuple(cursor)] = int(parts[3])
             # Switching variants starts a fresh value; incompatible old fields must not survive.
             if cursor:
                 parent = read(state["payload"], cursor[:-1])
@@ -385,19 +395,19 @@ class Forms:
                     parent.pop(cursor[-1], None)
                 elif cursor[-1] < len(parent):
                     parent[cursor[-1]] = None
-            state["page"] = 0
+            state['page'] = 0
         elif action == "value":
             value = state["options"][int(parts[3])]
             validate(value, schema)
             write(state["payload"], cursor, value)
             cursor.pop()
-            state["page"] = 0
+            state['page'] = 0
         elif action == "map":
-            state["waiting"] = "map"
-            await update.effective_message.reply_text("نام کلید جدید را بفرستید (مثلاً environment).")
+            state['waiting'] = "map"
+            await update.effective_message.reply_text(tr('نام کلید جدید را بفرستید (مثلاً environment).'))
             return
         elif action == "page":
-            state["page"] = max(0, state["page"] + int(parts[3]))
+            state['page'] = max(0, state["page"] + int(parts[3]))
         elif action in {"back", "remove"}:
             if action == "remove":
                 parent = read(state["payload"], cursor[:-1])
@@ -406,21 +416,21 @@ class Forms:
                 elif cursor[-1] < len(parent):
                     parent.pop(cursor[-1])
                 # Array indices may have shifted; forget union selections under this container.
-                state["variants"] = {k: v for k, v in state["variants"].items()
+                state['variants'] = {k: v for k, v in state["variants"].items()
                                      if k[:len(cursor)-1] != tuple(cursor[:-1])}
             cursor.pop()
-            state["page"] = 0
+            state['page'] = 0
         elif action == "done":
             if cursor:
                 validate(read(state["payload"], cursor), schema)
                 cursor.pop()
-                state["page"] = 0
+                state['page'] = 0
             else:
                 op = OPERATIONS[state["index"]]
                 prepare(op, state["payload"])
                 if op["method"] == "GET":
                     payload = state["payload"]
-                    context.user_data.clear()
+                    self.manager.reset(context)
                     await self.manager.execute(update, context, state["pid"], op, payload)
                 else:
                     await self.manager.preview(update, context, state["pid"], op, state["payload"])
@@ -432,15 +442,15 @@ class Forms:
         await self.manager.project(update, state["pid"])
         if state["waiting"] == "map":
             if not text or len(text) > 255:
-                raise ValueError("نام کلید باید بین ۱ تا ۲۵۵ حرف باشد.")
+                raise ValueError(tr('نام کلید باید بین ۱ تا ۲۵۵ حرف باشد.'))
             state["cursor"].append(text)
             await self.render(update, context)
             return
         if state["waiting"] != "scalar":
-            raise ValueError("ابتدا فیلد مورد نظر را با دکمه انتخاب کنید.")
+            raise ValueError(tr('ابتدا فیلد مورد نظر را با دکمه انتخاب کنید.'))
         schema = node_schema(state)
         value = scalar(text, schema)
         write(state["payload"], state["cursor"], value)
         state["cursor"].pop()
-        state["page"] = 0
+        state['page'] = 0
         await self.render(update, context)

@@ -1,4 +1,5 @@
 """Only catalogued paths may reach the fixed Hetzner Cloud HTTPS origin."""
+from .i18n import tr
 import json
 import re
 from pathlib import Path
@@ -21,14 +22,14 @@ def schema_for(op):
         if location not in properties:
             continue
         group = properties[location]
-        group["properties"][parameter["name"]] = parameter["schema"]
+        group['properties'][parameter['name']] = parameter["schema"]
         if parameter.get("required"):
             group.setdefault("required", []).append(parameter["name"])
             if location not in required:
                 required.append(location)
     request = op["requestBody"]
     if request:
-        properties["body"] = request["content"]["application/json"]["schema"]
+        properties['body'] = request["content"]["application/json"]["schema"]
         if request.get("required"):
             required.append("body")
     return {"type": "object", "properties": properties, "required": required,
@@ -68,14 +69,14 @@ def prepare(op, payload):
     if errors:
         # Do not echo user values: they may contain credentials or private keys.
         field = ".".join(str(p) for p in errors[0].path) or "root"
-        raise ValueError(f"ورودی نامعتبر در {field}؛ قانون: {errors[0].validator}")
+        raise ValueError(tr('ورودی نامعتبر در {0}؛ قانون: {1}', field, errors[0].validator))
     path = op["path"]
     for name, value in payload.get("path", {}).items():
         if str(value) in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.*@:-]+", str(value)):
-            raise ValueError("شناسهٔ مسیر نامعتبر است.")
+            raise ValueError(tr('شناسهٔ مسیر نامعتبر است.'))
         path = path.replace("{" + name + "}", quote(str(value), safe=""))
     if "{" in path:
-        raise ValueError("شناسهٔ منبع وارد نشده است.")
+        raise ValueError(tr('شناسهٔ منبع وارد نشده است.'))
     query = []
     for name, value in payload.get("query", {}).items():
         for item in value if isinstance(value, list) else [value]:
@@ -99,7 +100,7 @@ class Cloud:
                 headers={"Authorization": "Bearer " + token}, params=query, json=body,
             )
         except httpx.HTTPError:
-            raise CloudError("خطای ارتباط؛ نتیجه نامشخص است. پیش از تکرار، وضعیت منبع را بررسی کنید.") from None
+            raise CloudError(tr('خطای ارتباط؛ نتیجه نامشخص است. پیش از تکرار، وضعیت منبع را بررسی کنید.')) from None
         if response.is_error:
             # Server error messages may echo request secrets; expose only the stable code.
             try:
@@ -107,7 +108,7 @@ class Cloud:
             except (ValueError, AttributeError):
                 code = "unknown"
             code = code if isinstance(code, str) and re.fullmatch(r"[a-z_]{1,80}", code) else "unknown"
-            wait = " محدودیت درخواست؛ کمی صبر کنید." if response.status_code == 429 else ""
+            wait = tr(' محدودیت درخواست؛ کمی صبر کنید.') if response.status_code == 429 else ""
             raise CloudError(f"Hetzner HTTP {response.status_code}: {code}.{wait}")
         return response.json() if response.content else {"status": "accepted"}
 

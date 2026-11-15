@@ -1,4 +1,5 @@
 """Current per-location capacity rules shared by simple and advanced plan pickers."""
+from .i18n import tr
 from datetime import datetime, timezone
 
 
@@ -28,4 +29,4 @@ async def all_items(cloud, token, operation, key, query=None):
         result.extend(response[key])
         if not response.get('meta', {}).get('pagination', {}).get('next_page'):
             return result
-    raise ValueError('فهرست منابع بیش از حد بزرگ است؛ از بخش پیشرفته با فیلتر استفاده کنید.')
+    raise ValueError(tr('فهرست منابع بیش از حد بزرگ است؛ از بخش پیشرفته با فیلتر استفاده کنید.'))
