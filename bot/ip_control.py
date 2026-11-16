@@ -37,7 +37,10 @@ class IPControl:
 
     async def recover(self, row):
         owner, project, server_id, family, old_id, new_id = row
-        _, token = await asyncio.to_thread(self.store.get, owner, project)
+        # Recovery is cleanup of an already-confirmed operation; use the project owner
+        # even if the initiating delegate has since been revoked.
+        principal = await asyncio.to_thread(self.store.project_owner, project)
+        _, token = await asyncio.to_thread(self.store.get, principal, project)
         server = await self.server(token, server_id)
         if server.get('locked') is not False or server['status'] != 'off':
             return False

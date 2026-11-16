@@ -14,7 +14,7 @@ def main():
     token = getpass.getpass("Telegram bot token (hidden): ").strip()
     if not re.fullmatch(r"[0-9]+:[A-Za-z0-9_-]+", token):
         raise SystemExit("Invalid Telegram bot token")
-    owners = input("Allowed Telegram numeric user IDs (comma-separated): ").strip()
+    owners = input("Bot owner Telegram numeric user IDs (comma-separated): ").strip()
     if not re.fullmatch(r"[1-9][0-9]*(\s*,\s*[1-9][0-9]*)*", owners):
         raise SystemExit("Invalid user IDs")
     key = base64.urlsafe_b64encode(secrets.token_bytes(32)).decode()

@@ -23,6 +23,7 @@ from .simple import SimpleUI, STATUS, server_card
 from .ip_control import IPControl
 from .availability import all_items
 from .i18n import LANGUAGE, tr
+from .admins import AdminUI
 
 TAGS = sorted({op["tag"] for op in OPERATIONS})
 COLLECTIONS = [
@@ -86,6 +87,8 @@ class Manager:
         self.simple = SimpleUI(self)
         self.ip_control = IPControl(store, cloud)
         self.languages = store.languages()
+        self.delegates = store.admin_ids(allowed)
+        self.admins = AdminUI(self)
 
     async def show(self, update, text, rows):
         message = update.effective_message
@@ -110,10 +113,24 @@ class Manager:
     def authorized(self, update):
         allowed = (update.effective_user is not None and update.effective_chat is not None
                 and update.effective_chat.type == "private"
-                and update.effective_user.id in self.allowed)
+                and update.effective_user.id in self.allowed | self.delegates)
         if allowed:
             LANGUAGE.set(self.languages.get(update.effective_user.id, 'fa'))
         return allowed
+
+    def require_owner(self, update):
+        if not self.authorized(update) or update.effective_user.id not in self.allowed:
+            raise ValueError(tr('فقط مالک بات اجازهٔ انجام این کار را دارد.'))
+
+    async def require_project_owner(self, update, pid):
+        self.require_owner(update)
+        if not await asyncio.to_thread(self.store.is_owner, update.effective_user.id, pid):
+            raise ValueError(tr('پروژه پیدا نشد یا اجازهٔ دسترسی ندارید.'))
+
+    async def manage_admins(self, update, context):
+        if not self.authorized(update):
+            return
+        await self.admins.menu(update, context)
 
     async def language(self, update, context):
         if not self.authorized(update):
@@ -122,6 +139,13 @@ class Manager:
         await self.show(update, tr('زبان بات را انتخاب کنید. / Choose your language.'), [[(tr('فارسی / Persian'), 'lang:fa'), ('English', 'lang:en')], [(tr('بازگشت'), 'projects')]])
 
     async def project(self, update, pid):
+        if not self.authorized(update):
+            raise ValueError(tr('دسترسی مجاز نیست.'))
+        actor = update.effective_user.id
+        principal = await asyncio.to_thread(self.store.project_owner, pid)
+        if actor not in self.allowed or principal != actor:
+            if principal not in self.allowed or not await asyncio.to_thread(self.store.has_grant, actor, pid):
+                raise ValueError(tr('پروژه پیدا نشد یا اجازهٔ دسترسی ندارید.'))
         return await asyncio.to_thread(self.store.get, update.effective_user.id, pid)
 
     async def send_json(self, update, value, filename="result.json"):
@@ -136,11 +160,19 @@ class Manager:
         if not self.authorized(update):
             return
         context.user_data.clear()
-        projects = await asyncio.to_thread(self.store.list, update.effective_user.id)
+        is_owner = update.effective_user.id in self.allowed
+        projects = await asyncio.to_thread(self.store.granted_projects, update.effective_user.id, self.allowed)
+        if is_owner:
+            projects += await asyncio.to_thread(self.store.owned_projects, update.effective_user.id)
+        projects = sorted(dict(projects).items(), key=lambda item: (item[1], item[0]))
         rows = [[(name, f"p:{pid}")] for pid, name in projects]
-        rows.append([(tr('➕ افزودن پروژه'), 'add')])
+        if is_owner:
+            rows.append([(tr('➕ افزودن پروژه'), 'add')])
+            rows.append([(tr('👥 مدیریت ادمین‌ها'), 'admins:0')])
         rows.append([(tr('🌐 زبان / Language'), 'language')])
-        await update.effective_message.reply_text(tr('پروژهٔ هتزنر را انتخاب کنید. هر پروژه توکن مستقل دارد.'), reply_markup=keyboard(rows))
+        text = tr('پروژهٔ هتزنر را انتخاب کنید. هر پروژه توکن مستقل دارد.') if is_owner else (
+            tr('پروژهٔ اختصاص‌یافته را انتخاب کنید.') if projects else tr('هنوز پروژه‌ای به شما اختصاص داده نشده است. از مالک بات درخواست دسترسی کنید.'))
+        await update.effective_message.reply_text(text, reply_markup=keyboard(rows))
 
     async def help(self, update, context):
         if not self.authorized(update):
@@ -150,6 +182,7 @@ class Manager:
     async def add(self, update, context):
         if not self.authorized(update):
             return
+        self.require_owner(update)
         context.user_data.clear()
         context.user_data['input'] = {"kind": "name"}
         await update.effective_message.reply_text(tr('نام دلخواه پروژه را بفرستید؛ /cancel برای لغو.'))
@@ -532,6 +565,9 @@ class Manager:
         await update.callback_query.answer()
         data = update.callback_query.data.split(":")
         kind = data[0]
+        if kind in {'admins', 'admin', 'adminadd', 'admingrants', 'adminpick', 'adminremove', 'adminconfirm'}:
+            await self.admins.callback(update, context, data)
+            return
         if kind == 'language':
             await self.language(update, context)
             return
@@ -583,6 +619,7 @@ class Manager:
                                              pending.payload['family'], pending.payload['new_ip'], pending.payload['old_ip'])
                 await self.ip_menu(update, pending.project, pending.payload['server'])
             elif pending.operation == "forget":
+                await self.require_project_owner(update, pending.project)
                 await asyncio.to_thread(self.store.remove, update.effective_user.id, pending.project)
                 await self.projects(update, context)
             else:
@@ -631,14 +668,18 @@ class Manager:
             await self.ip_preview(update, context, pid, int(data[2]), data[3], None)
         elif kind == 'iprecover':
             for row in await asyncio.to_thread(self.store.ip_changes):
-                if row[0] == update.effective_user.id and row[1] == pid and row[2] == int(data[2]):
+                if row[1] == pid and row[2] == int(data[2]):
                     if not await self.ip_control.recover(row):
                         raise ValueError(tr('بازیابی هنوز ممکن نیست؛ وضعیت سرور و IPها را در هتزنر بررسی کنید.'))
             await self.ip_menu(update, pid, int(data[2]))
         elif kind == 'bind':
             await self.bind_resource(update, context, pid, int(data[2]), data[3])
         elif kind == 'settings':
-            await self.show(update, tr('⚙️ تنظیمات {0}', name), [[(tr('🌐 زبان / Language'), 'language')], [(tr('🧰 بخش پیشرفته'), f'advanced:{pid}')], [(tr('حذف اتصال این پروژه از بات'), f'forget:{pid}')], [(tr('بازگشت'), f'p:{pid}')]])
+            rows = [[(tr('🌐 زبان / Language'), 'language')], [(tr('🧰 بخش پیشرفته'), f'advanced:{pid}')]]
+            if update.effective_user.id in self.allowed and await asyncio.to_thread(self.store.is_owner, update.effective_user.id, pid):
+                rows.append([(tr('حذف اتصال این پروژه از بات'), f'forget:{pid}')])
+            rows.append([(tr('بازگشت'), f'p:{pid}')])
+            await self.show(update, tr('⚙️ تنظیمات {0}', name), rows)
         elif kind == 'advanced':
             await self.show(update, tr('🧰 ابزارهای پیشرفتهٔ {0}\nبرای کارهای روزمره از منوی اصلی استفاده کن.', name), [[(tr('شبکه، فایروال، دیسک، DNS و سایر منابع'), f'resources:{pid}')], [(tr('تمام عملیات و ورودی تخصصی'), f'tags:{pid}:0')], [(tr('بازگشت'), f'p:{pid}')]])
         elif kind in {'images', 'ips', 'pic', 'ip', 'sub'}:
@@ -659,6 +700,7 @@ class Manager:
                 path = {key: data[3] if key == 'id_or_name' else int(data[3])}
             await self.forms.start(update, context, pid, index, path)
         elif kind == "forget":
+            await self.require_project_owner(update, pid)
             nonce = secrets.token_hex(12)
             context.user_data['pending'] = Pending(nonce, pid, "forget", {}, time.monotonic() + 120)
             await update.effective_message.reply_text(tr('اتصال {0} از بات حذف شود؟ منابع هتزنر حذف نمی\u200cشوند؛ توکن در هتزنر باطل نمی\u200cشود.', name), reply_markup=keyboard([[(tr('حذف اتصال'), f'yes:{nonce}'), (tr('لغو'), 'cancel')]]))
@@ -723,6 +765,11 @@ class Manager:
             await update.effective_message.reply_text(tr('از /projects شروع کنید.'))
             return
         text = supplied_text if supplied_text is not None else update.effective_message.text.strip()
+        if state['kind'].startswith('admin_'):
+            await self.admins.text(update, context, text)
+            return
+        if state['kind'] in {'name', 'token'}:
+            self.require_owner(update)
         if state['kind'] == 'simple':
             await self.simple.text(update, context, text)
             return
@@ -832,9 +879,14 @@ def main():
 
     async def startup(application):
         for row in await asyncio.to_thread(store.ip_changes):
-            if row[0] not in allowed:
+            try:
+                principal = await asyncio.to_thread(store.project_owner, row[1])
+            except ValueError:
+                logging.error('ip_recovery_project_missing project=%s server=%s', row[1], row[2])
                 continue
-            LANGUAGE.set(manager.languages.get(row[0], 'fa'))
+            if principal not in allowed:
+                continue
+            LANGUAGE.set(manager.languages.get(principal, 'fa'))
             try:
                 outcome = await manager.ip_control.recover(row)
                 text = tr('تغییر IP ناتمام بررسی و بازیابی شد.') if outcome else tr('تغییر IP ناتمام است؛ سرور را خاموش نگه دارید و بازیابی IP را بررسی کنید.')
@@ -842,9 +894,9 @@ def main():
                 logging.error('ip_recovery_failed project=%s server=%s', row[1], row[2])
                 text = tr('بازیابی IP انجام نشد؛ وضعیت سرور را بررسی کنید.')
             try:
-                await application.bot.send_message(row[0], text)
+                await application.bot.send_message(principal, text)
             except TelegramError:
-                logging.error('ip_recovery_notification_failed owner=%s', row[0])
+                logging.error('ip_recovery_notification_failed owner=%s', principal)
         application.bot_data['cleanup'] = asyncio.create_task(cleanup(application), name="expire-private-state")
 
     async def shutdown(application):
@@ -861,6 +913,7 @@ def main():
     application.add_handler(CommandHandler("add", manager.add))
     application.add_handler(CommandHandler("help", manager.help))
     application.add_handler(CommandHandler("language", manager.language))
+    application.add_handler(CommandHandler("admins", manager.manage_admins))
     application.add_handler(CallbackQueryHandler(manager.callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manager.text))
     application.add_handler(MessageHandler(filters.Document.ALL, manager.document))
