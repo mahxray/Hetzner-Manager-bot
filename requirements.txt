@@ -4,3 +4,4 @@ cryptography==50.0.2
 jsonschema==4.26.0
 python-dotenv==1.2.2
 matplotlib==3.11.2
+tzdata==2026.6

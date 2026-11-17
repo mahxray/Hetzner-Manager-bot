@@ -454,5 +454,18 @@
   "این شناسه معتبر نیست یا از قبل مالک بات است.": "This ID is invalid or is already a bot owner.",
   "این ادمین قبلاً ثبت شده است؛ از فهرست ادمین‌ها انتخاب کنید.": "This admin already exists. Select the admin from the list.",
   "یک نام دلخواه برای ادمین بنویسید.": "Enter a name for the admin.",
-  "ابتدا از دکمه‌های مدیریت ادمین استفاده کنید.": "Use the admin management buttons first."
+  "ابتدا از دکمه‌های مدیریت ادمین استفاده کنید.": "Use the admin management buttons first.",
+  "ریال": "IRR",
+  "قیمت دریافت‌شده معتبر نیست.": "The received price is invalid.",
+  "نرخ: 1 {0} = {1} {2}\nمنبع: {3}\nتاریخ/زمان نرخ: {4}\nقیمت تبدیل‌شده تخمینی است.": "Rate: 1 {0} = {1} {2}\nSource: {3}\nRate date/time: {4}\nThe converted price is an estimate.",
+  "نرخ معتبر در دسترس نیست؛ قیمت اصلی حساب هتزنر با واحد {0} نمایش داده می‌شود.": "A valid exchange rate is unavailable; showing the original Hetzner account price in {0}.",
+  "واحد اصلی حساب هتزنر": "Original Hetzner account currency",
+  "💱 واحد نمایش قیمت\nانتخاب فعلی: {0}\nیورو یا ریال را انتخاب کنید. تبدیل ریالی با نرخ بازار آزاد روز انجام می‌شود؛ این تنظیم فقط نمایش است و واحد پرداخت هتزنر را تغییر نمی‌دهد.": "💱 Price display currency\nCurrent selection: {0}\nChoose EUR or IRR. Rial estimates use today's free-market rate. This setting changes display only, not Hetzner's billing currency.",
+  "نرخ معتبر روز فعلاً در دسترس نیست؛ تا دریافت نرخ معتبر، قیمت اصلی حساب نمایش داده می‌شود.": "Today's valid rate is currently unavailable; showing original account prices until a valid rate is received.",
+  "یورو (EUR)": "Euro (EUR)",
+  "ریال (IRR)": "Rial (IRR)",
+  "قیمت ماهانهٔ پلن: {0}": "Monthly plan price: {0}",
+  "💱 واحد قیمت": "💱 Price currency",
+  " · {0}/ماه": " · {0}/month",
+  "نرخ تبدیل": "Exchange rate"
 }

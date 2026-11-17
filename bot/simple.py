@@ -2,7 +2,6 @@
 from .i18n import tr
 import secrets
 import time
-from decimal import Decimal, ROUND_HALF_UP
 
 from .api import BY_ID, prepare
 from .availability import all_items, available_plan
@@ -74,7 +73,7 @@ class SimpleUI:
         state = {'kind': 'simple', 'pid': pid, 'operation': operation, 'path': path, 'body': body,
                  'labels': labels, 'steps': steps, 'step': 0, 'page': 0,
                  'expires': time.monotonic() + 900, 'server': server, 'image_arch': image_arch,
-                 'ip_location': ip_location}
+                 'ip_location': ip_location, 'actor': update.effective_user.id}
         context.user_data['input'] = state
         await self.render(update, context)
 
@@ -104,13 +103,15 @@ class SimpleUI:
             result = []
             pricing = await cloud.execute(token, BY_ID['get_pricing'], {})
             currency = (pricing.get('pricing') or {}).get('currency')
+            state['account_currency'] = currency
+            display = await self.manager.prices.context(state['actor'], currency) if currency else None
+            state['price_note'] = display.note if display else ''
             for plan in plans:
                 price = next((p for p in plan.get('prices', []) if p['location'] == location), {})
                 amount = (price.get('price_monthly') or {}).get('gross')
                 label = tr('{0} · {1} هسته · {2} GB RAM', plan['name'], plan.get('cores', '?'), plan.get('memory', '?'))
                 if amount and currency:
-                    display_price = format(Decimal(str(amount)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), '.2f')
-                    label += tr(' · {0} {1}/ماه', display_price, currency)
+                    label += tr(' · {0}/ماه', display.format(amount))
                 result.append((plan['name'], label, plan))
             return result
         if mode in {'image', 'restore'}:
@@ -161,6 +162,18 @@ class SimpleUI:
                 except ValueError:
                     context.user_data.clear()
                     raise
+            plan = state.get('selected_plan')
+            if plan and state.get('account_currency'):
+                location = state['body'].get('location') or (((state.get('server') or {}).get('datacenter') or {}).get('location') or {}).get('name')
+                raw = next((p for p in plan.get('prices', []) if p.get('location') == location), {})
+                amount = (raw.get('price_monthly') or {}).get('gross')
+                if amount is not None:
+                    display = await self.manager.prices.context(state['actor'], state['account_currency'])
+                    label = tr('{0} · {1} هسته · {2} GB RAM', plan['name'], plan.get('cores', '?'), plan.get('memory', '?'))
+                    state['labels']['server_type'] = label + tr(' · {0}/ماه', display.format(amount))
+                    state['price_note'] = display.note
+            if state.get('price_note'):
+                state['labels'][tr('نرخ تبدیل')] = state['price_note']
             await self.manager.preview(update, context, state['pid'], BY_ID[state['operation']], payload,
                                        simple=True, labels=state['labels'])
             return
@@ -173,6 +186,8 @@ class SimpleUI:
         if mode != 'text':
             options = await self.choices(state, token, mode)
             state['options'] = options
+            if mode == 'plan' and state.get('price_note'):
+                question += '\n\n' + state['price_note']
             for i in range(state['page']*6, min(len(options), (state['page']+1)*6)):
                 rows.append([(options[i][1], prefix + f'pick:{i}')])
             nav = []
@@ -208,6 +223,7 @@ class SimpleUI:
                 state['labels'].pop(field, None)
             if any(field == 'server_type' for field, _, _ in state['steps'][state['step']:]):
                 state.pop('architecture', None)
+                state.pop('selected_plan', None)
         elif action in {'pick', 'skip'}:
             if action == 'skip':
                 if mode != 'ssh':
@@ -226,6 +242,7 @@ class SimpleUI:
                     state['labels'][key] = label
                 if mode == 'plan':
                     state['architecture'] = metadata.get('architecture')
+                    state['selected_plan'] = metadata
             state['step'] += 1
             state['page'] = 0
         await self.render(update, context)

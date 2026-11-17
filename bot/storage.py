@@ -20,6 +20,7 @@ class Store:
                 id TEXT PRIMARY KEY, owner INTEGER NOT NULL, name TEXT NOT NULL,
                 token BLOB NOT NULL, UNIQUE(owner, name))""")
             db.execute("CREATE TABLE IF NOT EXISTS preferences (owner INTEGER PRIMARY KEY, language TEXT NOT NULL CHECK(language IN ('fa','en')))")
+            db.execute("CREATE TABLE IF NOT EXISTS price_preferences (owner INTEGER PRIMARY KEY, currency TEXT NOT NULL CHECK(currency IN ('EUR','IRR')))")
             db.execute("""CREATE TABLE IF NOT EXISTS ip_changes (
                 project TEXT NOT NULL, server INTEGER NOT NULL, owner INTEGER NOT NULL,
                 family TEXT NOT NULL, old_ip INTEGER, new_ip INTEGER,
@@ -153,6 +154,18 @@ class Store:
         with self.connect() as db:
             db.execute('INSERT INTO preferences VALUES (?, ?) ON CONFLICT(owner) DO UPDATE SET language=excluded.language',
                        (owner, language))
+
+    def display_currency(self, owner):
+        with self.connect() as db:
+            row = db.execute('SELECT currency FROM price_preferences WHERE owner=?', (owner,)).fetchone()
+        return row[0] if row else None
+
+    def set_display_currency(self, owner, currency):
+        if currency not in {'EUR', 'IRR'}:
+            raise ValueError('Unsupported display currency')
+        with self.connect() as db:
+            db.execute('INSERT INTO price_preferences VALUES (?, ?) ON CONFLICT(owner) DO UPDATE SET currency=excluded.currency',
+                       (owner, currency))
 
     def begin_ip_change(self, owner, project, server, family, old_ip, new_ip):
         with self.connect() as db:

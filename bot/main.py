@@ -24,6 +24,7 @@ from .ip_control import IPControl
 from .availability import all_items
 from .i18n import LANGUAGE, tr
 from .admins import AdminUI
+from .pricing import ExchangeRates, PriceDisplay, RateUnavailable
 
 TAGS = sorted({op["tag"] for op in OPERATIONS})
 COLLECTIONS = [
@@ -81,7 +82,7 @@ def expire_state(state, now):
 class Manager:
     keyboard = staticmethod(keyboard)
 
-    def __init__(self, store, cloud, allowed):
+    def __init__(self, store, cloud, allowed, rates=None):
         self.store, self.cloud, self.allowed = store, cloud, allowed
         self.forms = Forms(self)
         self.simple = SimpleUI(self)
@@ -89,6 +90,7 @@ class Manager:
         self.languages = store.languages()
         self.delegates = store.admin_ids(allowed)
         self.admins = AdminUI(self)
+        self.prices = PriceDisplay(store, rates)
 
     async def show(self, update, text, rows):
         message = update.effective_message
@@ -138,6 +140,43 @@ class Manager:
         context.user_data.clear()
         await self.show(update, tr('زبان بات را انتخاب کنید. / Choose your language.'), [[(tr('فارسی / Persian'), 'lang:fa'), ('English', 'lang:en')], [(tr('بازگشت'), 'projects')]])
 
+    async def currency_settings(self, update, context):
+        if not self.authorized(update):
+            return
+        context.user_data.clear()
+        selected = await asyncio.to_thread(self.store.display_currency, update.effective_user.id)
+        label = tr('واحد اصلی حساب هتزنر') if selected is None else tr('ریال') if selected == 'IRR' else 'EUR'
+        text = tr('💱 واحد نمایش قیمت\nانتخاب فعلی: {0}\nیورو یا ریال را انتخاب کنید. تبدیل ریالی با نرخ بازار آزاد روز انجام می‌شود؛ این تنظیم فقط نمایش است و واحد پرداخت هتزنر را تغییر نمی‌دهد.', label)
+        if selected == 'IRR':
+            try:
+                if self.prices.rates is None:
+                    raise RateUnavailable
+                text += '\n\n' + (await self.prices.rates.quote('EUR', 'IRR')).note()
+            except RateUnavailable:
+                text += '\n\n' + tr('نرخ معتبر روز فعلاً در دسترس نیست؛ تا دریافت نرخ معتبر، قیمت اصلی حساب نمایش داده می‌شود.')
+        await self.show(update, text, [
+            [(('✅ ' if selected == 'EUR' else '') + tr('یورو (EUR)'), 'currency:EUR'),
+             (('✅ ' if selected == 'IRR' else '') + tr('ریال (IRR)'), 'currency:IRR')],
+            [(tr('🔄 تازه‌سازی'), 'currency')], [(tr('بازگشت'), 'projects')]])
+
+    async def server_text(self, actor, project, token, server):
+        text = server_card(server, project)
+        location = (server.get('datacenter') or {}).get('location', {}).get('name')
+        price = next((p for p in (server.get('server_type') or {}).get('prices', []) if p.get('location') == location), {})
+        amount = (price.get('price_monthly') or {}).get('gross')
+        if amount is None:
+            return text
+        try:
+            currency = (await self.cloud.execute(token, BY_ID['get_pricing'], {})).get('pricing', {}).get('currency')
+        except CloudError:
+            return text
+        if currency:
+            display = await self.prices.context(actor, currency)
+            text += '\n' + tr('قیمت ماهانهٔ پلن: {0}', display.format(amount))
+            if display.note:
+                text += '\n\n' + display.note
+        return text
+
     async def project(self, update, pid):
         if not self.authorized(update):
             raise ValueError(tr('دسترسی مجاز نیست.'))
@@ -170,6 +209,7 @@ class Manager:
             rows.append([(tr('➕ افزودن پروژه'), 'add')])
             rows.append([(tr('👥 مدیریت ادمین‌ها'), 'admins:0')])
         rows.append([(tr('🌐 زبان / Language'), 'language')])
+        rows.append([(tr('💱 واحد قیمت'), 'currency')])
         text = tr('پروژهٔ هتزنر را انتخاب کنید. هر پروژه توکن مستقل دارد.') if is_owner else (
             tr('پروژهٔ اختصاص‌یافته را انتخاب کنید.') if projects else tr('هنوز پروژه‌ای به شما اختصاص داده نشده است. از مالک بات درخواست دسترسی کنید.'))
         await update.effective_message.reply_text(text, reply_markup=keyboard(rows))
@@ -201,7 +241,7 @@ class Manager:
                 rows[-1].append((tr('جداسازی {0}', family.upper()), f'ipdetach:{pid}:{server_id}:{family}'))
         rows += [[(tr('➕ ساخت IP'), f"new:{pid}:{OPERATIONS.index(BY_ID['create_primary_ip'])}")],
                  [(tr('بازیابی IP ناتمام'), f'iprecover:{pid}:{server_id}')], [(tr('بازگشت به سرور'), f'srv:{pid}:{server_id}')]]
-        await self.show(update, server_card(server, project) + tr('\n\nبرای تغییر IP، سرور باید خاموش باشد. IP جداشده حذف نمی\u200cشود و ممکن است همچنان هزینه داشته باشد.'), rows)
+        await self.show(update, await self.server_text(update.effective_user.id, project, token, server) + tr('\n\nبرای تغییر IP، سرور باید خاموش باشد. IP جداشده حذف نمی\u200cشود و ممکن است همچنان هزینه داشته باشد.'), rows)
 
     async def ip_pick(self, update, context, pid, server_id, family):
         _, token = await self.project(update, pid)
@@ -565,6 +605,11 @@ class Manager:
         await update.callback_query.answer()
         data = update.callback_query.data.split(":")
         kind = data[0]
+        if kind == 'currency':
+            if len(data) > 1:
+                await asyncio.to_thread(self.store.set_display_currency, update.effective_user.id, data[1])
+            await self.currency_settings(update, context)
+            return
         if kind in {'admins', 'admin', 'adminadd', 'admingrants', 'adminpick', 'adminremove', 'adminconfirm'}:
             await self.admins.callback(update, context, data)
             return
@@ -676,6 +721,7 @@ class Manager:
             await self.bind_resource(update, context, pid, int(data[2]), data[3])
         elif kind == 'settings':
             rows = [[(tr('🌐 زبان / Language'), 'language')], [(tr('🧰 بخش پیشرفته'), f'advanced:{pid}')]]
+            rows.insert(1, [(tr('💱 واحد قیمت'), 'currency')])
             if update.effective_user.id in self.allowed and await asyncio.to_thread(self.store.is_owner, update.effective_user.id, pid):
                 rows.append([(tr('حذف اتصال این پروژه از بات'), f'forget:{pid}')])
             rows.append([(tr('بازگشت'), f'p:{pid}')])
@@ -711,7 +757,7 @@ class Manager:
                                                {"path": {"id": int(data[2])}}))["server"]
             def action(label, op):
                 return (label, f"do:{pid}:{OPERATIONS.index(BY_ID[op])}:{server['id']}")
-            await self.show(update, server_card(server, name), [[action(tr('▶️ روشن کردن'), 'poweron_server'), action(tr('⏹ خاموش کردن'), 'shutdown_server')], [action(tr('🔄 ری\u200cاستارت'), 'reboot_server')], [(tr('📸 اسنپ\u200cشات و بکاپ'), f"sub:{pid}:{server['id']}:backup")], [(tr('⚙️ تغییرات سرور'), f"sub:{pid}:{server['id']}:settings")], [(tr('📊 نمودارها'), f"sub:{pid}:{server['id']}:graphs"), (tr('🌐 شبکه و IP'), f"sub:{pid}:{server['id']}:network")], [(tr('🛡 فایروال'), f"sub:{pid}:{server['id']}:firewall"), (tr('💾 دیسک\u200cها'), f"sub:{pid}:{server['id']}:volume")], [('⚖️ Load Balancer', f"sub:{pid}:{server['id']}:lb"), ('💿 ISO', f"sub:{pid}:{server['id']}:iso")], [('🛟 Rescue', f"sub:{pid}:{server['id']}:rescue"), (tr('⬆️ تغییر پلن'), f"sub:{pid}:{server['id']}:scale")], [(tr('🛠 نصب مجدد'), f"sub:{pid}:{server['id']}:rebuild"), (tr('🗑 حذف'), f"sub:{pid}:{server['id']}:delete")], [(tr('🔄 تازه\u200cسازی'), f"srv:{pid}:{server['id']}"), (tr('بازگشت'), f'servers:{pid}:1')]])
+            await self.show(update, await self.server_text(update.effective_user.id, name, token, server), [[action(tr('▶️ روشن کردن'), 'poweron_server'), action(tr('⏹ خاموش کردن'), 'shutdown_server')], [action(tr('🔄 ری\u200cاستارت'), 'reboot_server')], [(tr('📸 اسنپ\u200cشات و بکاپ'), f"sub:{pid}:{server['id']}:backup")], [(tr('⚙️ تغییرات سرور'), f"sub:{pid}:{server['id']}:settings")], [(tr('📊 نمودارها'), f"sub:{pid}:{server['id']}:graphs"), (tr('🌐 شبکه و IP'), f"sub:{pid}:{server['id']}:network")], [(tr('🛡 فایروال'), f"sub:{pid}:{server['id']}:firewall"), (tr('💾 دیسک\u200cها'), f"sub:{pid}:{server['id']}:volume")], [('⚖️ Load Balancer', f"sub:{pid}:{server['id']}:lb"), ('💿 ISO', f"sub:{pid}:{server['id']}:iso")], [('🛟 Rescue', f"sub:{pid}:{server['id']}:rescue"), (tr('⬆️ تغییر پلن'), f"sub:{pid}:{server['id']}:scale")], [(tr('🛠 نصب مجدد'), f"sub:{pid}:{server['id']}:rebuild"), (tr('🗑 حذف'), f"sub:{pid}:{server['id']}:delete")], [(tr('🔄 تازه\u200cسازی'), f"srv:{pid}:{server['id']}"), (tr('بازگشت'), f'servers:{pid}:1')]])
         elif kind == "quick":
             operation, body = {
                 "on": ("poweron_server", None), "stop": ("shutdown_server", None),
@@ -869,7 +915,8 @@ def main():
         raise SystemExit("Set TELEGRAM_BOT_TOKEN and positive ALLOWED_USER_IDS in .env")
     store = Store(os.environ.get("DATA_DIR", "./data"), os.environ["ENCRYPTION_KEY"])
     client = httpx.AsyncClient(timeout=30, follow_redirects=False)
-    manager = Manager(store, Cloud(client), allowed)
+    rates_client = httpx.AsyncClient(timeout=10, follow_redirects=False)
+    manager = Manager(store, Cloud(client), allowed, ExchangeRates(rates_client))
 
     async def cleanup(application):
         while True:
@@ -906,6 +953,7 @@ def main():
             with suppress(asyncio.CancelledError):
                 await task
         await client.aclose()
+        await rates_client.aclose()
 
     application = (Application.builder().token(token).concurrent_updates(False)
                    .post_init(startup).post_shutdown(shutdown).build())
@@ -914,6 +962,7 @@ def main():
     application.add_handler(CommandHandler("help", manager.help))
     application.add_handler(CommandHandler("language", manager.language))
     application.add_handler(CommandHandler("admins", manager.manage_admins))
+    application.add_handler(CommandHandler("currency", manager.currency_settings))
     application.add_handler(CallbackQueryHandler(manager.callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manager.text))
     application.add_handler(MessageHandler(filters.Document.ALL, manager.document))
