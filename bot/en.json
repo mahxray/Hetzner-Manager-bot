@@ -49,6 +49,7 @@
   "فعال کردن Rescue": "Enable Rescue Mode for a Server",
   "غیرفعال کردن Rescue": "Disable Rescue Mode for a Server",
   "قطع برق اجباری": "Force power off",
+  "🛟 Rescue": "🛟 Rescue",
   "برای روشن کردن، سرور باید خاموش باشد.": "The server must be off before it can be powered on.",
   "برای خاموش کردن نرم، سرور باید روشن باشد.": "The server must be running for a graceful shutdown.",
   "برای قطع برق اجباری، سرور باید روشن باشد.": "The server must be running before it can be force powered off.",
