@@ -21,7 +21,7 @@ from .storage import Store
 from .forms import Forms, title
 from .simple import SimpleUI, STATUS, server_card
 from .ip_control import IPControl
-from .availability import all_items
+from .availability import all_items, location_name
 from .i18n import LANGUAGE, tr
 from .admins import AdminUI
 from .pricing import ExchangeRates, PriceDisplay, RateUnavailable
@@ -161,7 +161,7 @@ class Manager:
 
     async def server_text(self, actor, project, token, server):
         text = server_card(server, project)
-        location = (server.get('datacenter') or {}).get('location', {}).get('name')
+        location = location_name(server)
         price = next((p for p in (server.get('server_type') or {}).get('prices', []) if p.get('location') == location), {})
         amount = (price.get('price_monthly') or {}).get('gross')
         if amount is None:
@@ -248,10 +248,10 @@ class Manager:
         server = await self.ip_control.server(token, server_id)
         if family not in {'ipv4', 'ipv6'} or server['status'] != 'off' or server.get('locked'):
             raise ValueError(tr('برای تغییر یا جداسازی IP، ابتدا سرور را خاموش کنید.'))
-        location = (server.get('datacenter') or {}).get('location', {}).get('name')
+        location = location_name(server)
         ips = await all_items(self.cloud, token, BY_ID['list_primary_ips'], 'primary_ips')
         options = [ip for ip in ips if ip['type'] == family and ip.get('assignee_id') is None
-                   and (ip.get('location') or (ip.get('datacenter') or {}).get('location') or {}).get('name') == location]
+                   and location_name(ip) == location]
         nonce = secrets.token_hex(8)
         context.user_data['input'] = {'kind': 'ip_pick', 'pid': pid, 'server': server_id, 'family': family,
                                       'options': options, 'nonce': nonce, 'expires': time.monotonic() + 600, 'page': 0}
@@ -295,7 +295,7 @@ class Manager:
         collection = {'volume': 'volumes', 'firewall': 'firewalls', 'lb': 'load_balancers'}[category]
         items = await all_items(self.cloud, token, BY_ID['list_' + collection], collection)
         if category == 'volume':
-            location = (server.get('datacenter') or {}).get('location', {}).get('name')
+            location = location_name(server)
             items = [item for item in items if item.get('assignee') is None and item.get('server') is None and location
                      and (item.get('location') or {}).get('name') == location]
         elif category == 'lb':
@@ -529,6 +529,8 @@ class Manager:
 
     async def execute(self, update, context, pid, op, payload, simple=False):
         name, token = await self.project(update, pid)
+        if simple:
+            await self.simple.validate_action(token, op['id'], payload)
         if simple and op['id'] == 'create_server':
             await self.simple.validate_create(token, payload)
         result = await self.cloud.execute(token, op, payload)
@@ -757,7 +759,22 @@ class Manager:
                                                {"path": {"id": int(data[2])}}))["server"]
             def action(label, op):
                 return (label, f"do:{pid}:{OPERATIONS.index(BY_ID[op])}:{server['id']}")
-            await self.show(update, await self.server_text(update.effective_user.id, name, token, server), [[action(tr('▶️ روشن کردن'), 'poweron_server'), action(tr('⏹ خاموش کردن'), 'shutdown_server')], [action(tr('🔄 ری\u200cاستارت'), 'reboot_server')], [(tr('📸 اسنپ\u200cشات و بکاپ'), f"sub:{pid}:{server['id']}:backup")], [(tr('⚙️ تغییرات سرور'), f"sub:{pid}:{server['id']}:settings")], [(tr('📊 نمودارها'), f"sub:{pid}:{server['id']}:graphs"), (tr('🌐 شبکه و IP'), f"sub:{pid}:{server['id']}:network")], [(tr('🛡 فایروال'), f"sub:{pid}:{server['id']}:firewall"), (tr('💾 دیسک\u200cها'), f"sub:{pid}:{server['id']}:volume")], [('⚖️ Load Balancer', f"sub:{pid}:{server['id']}:lb"), ('💿 ISO', f"sub:{pid}:{server['id']}:iso")], [('🛟 Rescue', f"sub:{pid}:{server['id']}:rescue"), (tr('⬆️ تغییر پلن'), f"sub:{pid}:{server['id']}:scale")], [(tr('🛠 نصب مجدد'), f"sub:{pid}:{server['id']}:rebuild"), (tr('🗑 حذف'), f"sub:{pid}:{server['id']}:delete")], [(tr('🔄 تازه\u200cسازی'), f"srv:{pid}:{server['id']}"), (tr('بازگشت'), f'servers:{pid}:1')]])
+            rows = []
+            if server.get('status') == 'off':
+                rows.append([action(tr('▶️ روشن کردن'), 'poweron_server')])
+            elif server.get('status') == 'running':
+                rows.append([action(tr('خاموش کردن نرم'), 'shutdown_server'),
+                             action(tr('قطع برق اجباری'), 'poweroff_server')])
+                rows.append([action(tr('🔄 ری\u200cاستارت'), 'reboot_server')])
+            rows += [[(tr('📸 اسنپ\u200cشات و بکاپ'), f"sub:{pid}:{server['id']}:backup")],
+                     [(tr('⚙️ تغییرات سرور'), f"sub:{pid}:{server['id']}:settings")],
+                     [(tr('📊 نمودارها'), f"sub:{pid}:{server['id']}:graphs"), (tr('🌐 شبکه و IP'), f"sub:{pid}:{server['id']}:network")],
+                     [(tr('🛡 فایروال'), f"sub:{pid}:{server['id']}:firewall"), (tr('💾 دیسک\u200cها'), f"sub:{pid}:{server['id']}:volume")],
+                     [('⚖️ Load Balancer', f"sub:{pid}:{server['id']}:lb"), ('💿 ISO', f"sub:{pid}:{server['id']}:iso")],
+                     [(tr('🛟 Rescue'), f"sub:{pid}:{server['id']}:rescue"), (tr('⬆️ تغییر پلن'), f"sub:{pid}:{server['id']}:scale")],
+                     [(tr('🛠 نصب مجدد'), f"sub:{pid}:{server['id']}:rebuild"), (tr('🗑 حذف'), f"sub:{pid}:{server['id']}:delete")],
+                     [(tr('🔄 تازه\u200cسازی'), f"srv:{pid}:{server['id']}"), (tr('بازگشت'), f'servers:{pid}:1')]]
+            await self.show(update, await self.server_text(update.effective_user.id, name, token, server), rows)
         elif kind == "quick":
             operation, body = {
                 "on": ("poweron_server", None), "stop": ("shutdown_server", None),
@@ -902,6 +919,12 @@ class Manager:
                     message = tr('این منبع دیگر در پروژه پیدا نشد. به فهرست برگرد و «تازه\u200cسازی» را بزن.')
                 elif 'resource_unavailable' in message:
                     message = tr('ظرفیت پلن انتخاب\u200cشده تمام شده است. دوباره از فهرست پلن\u200cهای موجود انتخاب کن.')
+                elif 'server_not_stopped' in message:
+                    message = tr('هتزنر این عملیات را فقط روی سرور خاموش می\u200cپذیرد. سرور را خاموش کن و دوباره تلاش کن.')
+                elif 'server_not_running' in message:
+                    message = tr('هتزنر این عملیات را فقط روی سرور روشن می\u200cپذیرد. ابتدا وضعیت سرور را بررسی کن.')
+                elif 'conflict' in message or 'locked' in message:
+                    message = tr('عملیات دیگری روی منبع در حال اجراست. آن را پیگیری کن و پس از پایان دوباره تلاش کن.')
             # ValueErrors from third-party libraries may include input; only our handlers produce
             # expected ValueErrors in normal operation. Other failures stay generic.
             await update.effective_message.reply_text(message[:3000])

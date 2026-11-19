@@ -4,7 +4,7 @@ import secrets
 import time
 
 from .api import BY_ID, prepare
-from .availability import all_items, available_plan
+from .availability import all_items, available_plan, location_name
 from .forms import scalar, title
 
 STATUS = {'running': '🟢 روشن', 'off': '🔴 خاموش', 'starting': '🟡 در حال روشن شدن',
@@ -12,13 +12,26 @@ STATUS = {'running': '🟢 روشن', 'off': '🔴 خاموش', 'starting': '�
           'rebuilding': '🟡 در حال نصب مجدد', 'deleting': 'در حال حذف'}
 
 
+def compatible_plan(plan, server):
+    current = server.get('server_type') or {}
+    if current.get('architecture') and plan.get('architecture') != current['architecture']:
+        return False
+    if current.get('storage_type') and plan.get('storage_type') != current['storage_type']:
+        return False
+    disk = server.get('disk')
+    if isinstance(disk, int) and isinstance(plan.get('disk'), int) and plan['disk'] < disk:
+        return False
+    return True
+
+
 def server_card(server, project):
     public = server.get('public_net') or {}
     plan = server.get('server_type') or {}
-    location = (server.get('datacenter') or {}).get('location') or {}
+    location = server.get('location') or (server.get('datacenter') or {}).get('location') or {}
     image = server.get('image') or {}
     gb = lambda n: f'{(n or 0) / 1024**3:.1f}'
-    return (tr('🖥 {0}\nپروژه: {1}\nوضعیت: {2}\n\nIPv4: {3}\nIPv6: {4}\nموقعیت: {5}\nپلن: {6} · {7} هسته · {8} GB RAM\nدیسک: {9} GB\nسیستم\u200cعامل: {10}\nترافیک خروجی: {11} GB\nبکاپ خودکار: {12}\nشناسه: {13}', server['name'], project, tr(STATUS.get(server['status'], server['status'])), (public.get('ipv4') or {}).get('ip', tr('ندارد')), (public.get('ipv6') or {}).get('ip', tr('ندارد')), location.get('city') or location.get('name', '—'), plan.get('name', '—'), plan.get('cores', '—'), plan.get('memory', '—'), server.get('disk', '—'), image.get('description') or image.get('name', '—'), gb(server.get('outgoing_traffic')), tr('فعال') if server.get('backup_window') else tr('غیرفعال'), server['id']))
+    location_label = location if isinstance(location, str) else location.get('city') or location.get('name', '—')
+    return (tr('🖥 {0}\nپروژه: {1}\nوضعیت: {2}\n\nIPv4: {3}\nIPv6: {4}\nموقعیت: {5}\nپلن: {6} · {7} هسته · {8} GB RAM\nدیسک: {9} GB\nسیستم\u200cعامل: {10}\nترافیک خروجی: {11} GB\nبکاپ خودکار: {12}\nشناسه: {13}', server['name'], project, tr(STATUS.get(server['status'], server['status'])), (public.get('ipv4') or {}).get('ip', tr('ندارد')), (public.get('ipv6') or {}).get('ip', tr('ندارد')), location_label, plan.get('name', '—'), plan.get('cores', '—'), plan.get('memory', '—'), server.get('disk', '—'), image.get('description') or image.get('name', '—'), gb(server.get('outgoing_traffic')), tr('فعال') if server.get('backup_window') else tr('غیرفعال'), server['id']))
 
 
 class SimpleUI:
@@ -36,12 +49,11 @@ class SimpleUI:
             if '/servers/' in BY_ID[operation]['path']:
                 server = (await self.manager.cloud.execute(token, BY_ID['get_server'], {'path': path}))['server']
                 labels[tr('سرور')] = f"{server['name']} (#{server['id']})"
-                if operation == 'change_server_type' and server['status'] != 'off':
-                    raise ValueError(tr('برای تغییر پلن، ابتدا سرور را خاموش کن و سپس دوباره این گزینه را بزن.'))
+                self.validate_server_status(operation, server)
             elif '/primary_ips/' in BY_ID[operation]['path']:
                 ip = (await self.manager.cloud.execute(token, BY_ID['get_primary_ip'], {'path': path}))['primary_ip']
                 labels['IP'] = f"{ip['name']} · {ip.get('ip', '')}"
-                ip_location = (ip.get('location') or (ip.get('datacenter') or {}).get('location') or {}).get('name')
+                ip_location = location_name(ip)
             elif '/images/' in BY_ID[operation]['path']:
                 image = (await self.manager.cloud.execute(token, BY_ID['get_image'], {'path': path}))['image']
                 labels[tr('اسنپ\u200cشات')] = image.get('description') or image.get('name') or str(resource_id)
@@ -59,13 +71,13 @@ class SimpleUI:
             body['type'] = 'snapshot'
         if operation == 'enable_server_rescue':
             body['type'] = 'linux64'
-        if operation in {'create_primary_ip', 'assign_primary_ip'}:
+        if operation == 'assign_primary_ip':
             body['assignee_type'] = 'server'
         nav = context.user_data.get('nav')
         if operation == 'create_primary_ip' and nav and nav['pid'] == pid:
             context_server = (await self.manager.cloud.execute(token, BY_ID['get_server'],
                               {'path': {'id': nav['server']}}))['server']
-            location = (context_server.get('datacenter') or {}).get('location') or {}
+            location = context_server.get('location') or (context_server.get('datacenter') or {}).get('location') or {}
             if location.get('name'):
                 body['location'] = location['name']
                 labels['location'] = location.get('city') or location['name']
@@ -76,6 +88,33 @@ class SimpleUI:
                  'ip_location': ip_location, 'actor': update.effective_user.id}
         context.user_data['input'] = state
         await self.render(update, context)
+
+    @staticmethod
+    def validate_server_status(operation, server):
+        status = server.get('status')
+        requirements = {
+            'poweron_server': (status == 'off', 'برای روشن کردن، سرور باید خاموش باشد.'),
+            'shutdown_server': (status == 'running', 'برای خاموش کردن نرم، سرور باید روشن باشد.'),
+            'poweroff_server': (status == 'running', 'برای قطع برق اجباری، سرور باید روشن باشد.'),
+            'change_server_type': (status == 'off', 'برای تغییر پلن، ابتدا سرور را خاموش کن و سپس دوباره این گزینه را بزن.'),
+        }
+        requirement = requirements.get(operation)
+        if requirement and not requirement[0]:
+            raise ValueError(tr(requirement[1]))
+
+    async def validate_action(self, token, operation, payload):
+        if operation not in {'poweron_server', 'shutdown_server', 'poweroff_server', 'change_server_type'}:
+            return
+        server = (await self.manager.cloud.execute(
+            token, BY_ID['get_server'], {'path': payload['path']}))['server']
+        self.validate_server_status(operation, server)
+        if operation == 'change_server_type':
+            requested = (payload.get('body') or {}).get('server_type')
+            location = location_name(server)
+            plans = await all_items(self.manager.cloud, token, BY_ID['list_server_types'], 'server_types')
+            plan = next((item for item in plans if item.get('name') == requested), None)
+            if not location or not plan or not available_plan(plan, location) or not compatible_plan(plan, server):
+                raise ValueError(tr('این پلن دیگر در موقعیت سرور موجود یا سازگار نیست؛ دوباره از فهرست پلن‌ها انتخاب کن.'))
 
     def state(self, context):
         state = context.user_data.get('input', {})
@@ -96,10 +135,10 @@ class SimpleUI:
             return [(x['name'], f"{x.get('country', '')} · {x.get('city', x['name'])}", x)
                     for x in await listing('locations')]
         if mode == 'plan':
-            location = body.get('location') or (((state.get('server') or {}).get('datacenter') or {}).get('location') or {}).get('name')
-            architecture = ((state.get('server') or {}).get('server_type') or {}).get('architecture')
+            location = body.get('location') or location_name(state.get('server') or {})
             plans = [p for p in await listing('server_types') if available_plan(p, location)
-                     and (not architecture or p.get('architecture') == architecture)]
+                     and (state['operation'] != 'change_server_type'
+                          or compatible_plan(p, state.get('server') or {}))]
             result = []
             pricing = await cloud.execute(token, BY_ID['get_pricing'], {})
             currency = (pricing.get('pricing') or {}).get('currency')
@@ -138,7 +177,7 @@ class SimpleUI:
             return [(x['id'], f"{x['name']} · {tr(STATUS.get(x['status'], x['status']))}", x)
                     for x in await listing('servers') if x.get('status') != 'deleting'
                     and (state['operation'] != 'assign_primary_ip' or x.get('status') == 'off')
-                    and (not state.get('ip_location') or ((x.get('datacenter') or {}).get('location') or {}).get('name') == state['ip_location'])
+                    and (not state.get('ip_location') or location_name(x) == state['ip_location'])
                     and (not state.get('image_arch') or (x.get('server_type') or {}).get('architecture') == state['image_arch'])]
         if mode == 'family':
             return [('ipv4', tr('IPv4 (دارای هزینه)'), {}), ('ipv6', 'IPv6', {})]
@@ -164,7 +203,7 @@ class SimpleUI:
                     raise
             plan = state.get('selected_plan')
             if plan and state.get('account_currency'):
-                location = state['body'].get('location') or (((state.get('server') or {}).get('datacenter') or {}).get('location') or {}).get('name')
+                location = state['body'].get('location') or location_name(state.get('server') or {})
                 raw = next((p for p in plan.get('prices', []) if p.get('location') == location), {})
                 amount = (raw.get('price_monthly') or {}).get('gross')
                 if amount is not None:

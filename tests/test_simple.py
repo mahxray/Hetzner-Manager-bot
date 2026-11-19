@@ -215,7 +215,7 @@ class SimpleFlowTests(unittest.IsolatedAsyncioTestCase):
         await self.click('pick:0')
         pending = self.context.user_data['pending']
         self.assertEqual(pending.payload['body'], {'name': 'my-ip', 'type': 'ipv4',
-                                                  'assignee_type': 'server', 'location': 'fsn1'})
+                                                  'location': 'fsn1'})
 
     async def test_project_home_hides_technical_tools(self):
         event = update()

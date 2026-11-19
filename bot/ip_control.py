@@ -4,6 +4,7 @@ import asyncio
 import sqlite3
 
 from .api import BY_ID, CloudError
+from .availability import location_name
 
 UNSET = object()
 
@@ -88,8 +89,8 @@ class IPControl:
                 raise ValueError(tr('IP فعلی سرور تغییر کرده است؛ دوباره انتخاب و تأیید کنید.'))
         if new_id is not None:
             new = await self.ip(token, new_id)
-            location = (server.get('datacenter') or {}).get('location', {}).get('name')
-            ip_location = (new.get('location') or (new.get('datacenter') or {}).get('location') or {}).get('name')
+            location = location_name(server)
+            ip_location = location_name(new)
             if new['type'] != family or new.get('assignee_id') is not None or not location or ip_location != location:
                 raise ValueError(tr('IP باید آزاد، هم\u200cنوع و در موقعیت همین سرور باشد.'))
         row = (owner, project, server_id, family, old_id, new_id)

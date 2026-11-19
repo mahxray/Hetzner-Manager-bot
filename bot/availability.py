@@ -3,6 +3,15 @@ from .i18n import tr
 from datetime import datetime, timezone
 
 
+def location_name(resource):
+    location = resource.get('location')
+    if isinstance(location, dict) and location.get('name'):
+        return location['name']
+    if isinstance(location, str):
+        return location
+    return ((resource.get('datacenter') or {}).get('location') or {}).get('name')
+
+
 def available_plan(plan, location=None, now=None):
     now = now or datetime.now(timezone.utc)
     for entry in plan.get('locations', []):
