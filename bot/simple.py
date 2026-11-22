@@ -1,5 +1,6 @@
 """Task-oriented screens and sequential questions for everyday server management."""
 from .i18n import tr
+import ipaddress
 import secrets
 import time
 
@@ -23,6 +24,13 @@ def location_flag(location):
     if not isinstance(country, str) or len(country) != 2 or not country.isascii() or not country.isalpha():
         return ''
     return ''.join(chr(127397 + ord(letter.upper())) for letter in country)
+
+
+def floating_setup_command(address, family):
+    if family == 'ipv4':
+        return f'sudo ip addr add {address}/32 dev eth0'
+    network = ipaddress.ip_network(address, strict=False)
+    return f'sudo ip addr add {network.network_address + 1}/128 dev eth0'
 
 
 def compatible_plan(plan, server):
@@ -73,6 +81,11 @@ class SimpleUI:
                 image = (await self.manager.cloud.execute(token, BY_ID['get_image'], {'path': path}))['image']
                 labels[tr('اسنپ\u200cشات')] = image.get('description') or image.get('name') or str(resource_id)
         steps = {'create_server': [('name', 'text', tr('برای سرور یک نام انگلیسی بنویس؛ مثلاً my-server.')), ('location', 'location', tr('سرور در کدام کشور / شهر ساخته شود؟')), ('server_type', 'plan', tr('یکی از پلن\u200cهای موجود در همین موقعیت را انتخاب کن.')), ('image', 'image', tr('سیستم\u200cعامل سرور را انتخاب کن.')), ('ssh_keys', 'ssh', tr('کلید SSH را انتخاب کن یا از این مرحله بگذر.'))], 'update_server': [('name', 'text', tr('نام جدید سرور را به انگلیسی بنویس.'))], 'create_server_image': [('description', 'text', tr('یک نام برای این اسنپ\u200cشات بنویس.'))], 'rebuild_server': [('image', 'restore', tr('سیستم\u200cعامل یا بکاپ برای نصب مجدد را انتخاب کن. همهٔ اطلاعات دیسک پاک می\u200cشود.'))], 'change_server_type': [('server_type', 'plan', tr('پلن جدید را انتخاب کن. سرور باید خاموش باشد.')), ('upgrade_disk', 'disk', tr('دیسک هم بزرگ شود؟ افزایش اندازهٔ دیسک برگشت\u200cپذیر نیست.'))], 'create_primary_ip': [('name', 'text', tr('برای IP یک نام انگلیسی بنویس.')), ('type', 'family', tr('نوع IP را انتخاب کن.')), ('location', 'ip_location', tr('موقعیت IP را انتخاب کن.'))], 'assign_primary_ip': [('assignee_id', 'server', tr('IP به کدام سرور متصل شود؟ سرور باید خاموش باشد.'))], 'update_primary_ip': [('name', 'text', tr('نام جدید IP را به انگلیسی بنویس.'))], 'update_image': [('description', 'text', tr('نام جدید اسنپ\u200cشات را بنویس.'))], 'attach_server_iso': [('iso', 'iso', tr('فایل ISO سازگار با سرور را انتخاب کن.'))], 'attach_server_to_network': [('network', 'network', tr('شبکهٔ خصوصی را انتخاب کن.'))], 'detach_server_from_network': [('network', 'network', tr('کدام شبکه از سرور جدا شود؟'))], 'change_server_dns_ptr': [('ip', 'text', tr('آدرس IP کامل را بنویس.')), ('dns_ptr', 'text', tr('نام Reverse DNS را بنویس.'))]}.get(operation, [])
+        if operation == 'create_floating_ip':
+            steps = [('name', 'text', tr('برای Floating IP یک نام انگلیسی بنویس.')),
+                     ('type', 'family', tr('نوع Floating IP را انتخاب کن.')),
+                     ('target_server', 'floating_server', tr('Floating IP روی کدام سرور ست شود؟ سرور باید Primary IP هم‌نوع داشته باشد.')),
+                     ('home_location', 'floating_location', tr('ریجن Floating IP را انتخاب کن؛ فقط ریجن‌های هم‌زون با سرور نمایش داده می‌شوند.'))]
         image_arch = None
         if image_id is not None:
             image = (await self.manager.cloud.execute(token, BY_ID['get_image'], {'path': {'id': int(image_id)}}))['image']
@@ -149,6 +162,19 @@ class SimpleUI:
         if mode == 'ip_location':
             return [(x['name'], f"{x.get('country', '')} · {x.get('city', x['name'])}", x)
                     for x in await listing('locations')]
+        if mode == 'floating_server':
+            family = body.get('type')
+            return [(x['id'], f"{x['name']} · {tr(STATUS.get(x['status'], x['status']))}", x)
+                    for x in await listing('servers') if x.get('status') != 'deleting'
+                    and (x.get('public_net', {}).get(family) or {}).get('ip')]
+        if mode == 'floating_location':
+            locations = await listing('locations')
+            server_location = location_name(state.get('target_server') or {})
+            server_region = next((x for x in locations if x.get('name') == server_location), None)
+            if not server_region or not server_region.get('network_zone'):
+                return []
+            return [(x['name'], f"{location_flag(x)} {x.get('city', x['name'])} ({x['name']})", x)
+                    for x in locations if x.get('network_zone') == server_region['network_zone']]
         if mode == 'plan':
             location = body.get('location') or location_name(state.get('server') or {})
             plans = [p for p in await listing('server_types') if available_plan(p, location)
@@ -205,6 +231,9 @@ class SimpleUI:
         state = self.state(context)
         project, token = await self.manager.project(update, state['pid'])
         if state['step'] == len(state['steps']):
+            if state['operation'] == 'create_floating_ip':
+                await self.manager.floating_create_preview(update, context, state)
+                return
             payload = {}
             if state['path']:
                 payload['path'] = state['path']
@@ -291,6 +320,10 @@ class SimpleUI:
                     state['path'] = {'id': value}
                     state['labels'][tr('سرور')] = label
                     state['server'] = metadata
+                elif mode == 'floating_server':
+                    state['target_server_id'] = value
+                    state['target_server'] = metadata
+                    state['labels'][tr('سرور')] = f"{metadata['name']} (#{metadata['id']})"
                 else:
                     state['body'][key] = value
                     state['labels'][key] = label

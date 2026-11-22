@@ -20,7 +20,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Mess
 from .api import BY_ID, OPERATIONS, Cloud, CloudError, prepare, redact, sample, schema_for
 from .storage import Store
 from .forms import Forms, title
-from .simple import SimpleUI, STATUS, server_card
+from .simple import SimpleUI, STATUS, floating_setup_command, server_card
 from .ip_control import IPControl
 from .availability import all_items, location_name
 from .i18n import LANGUAGE, tr
@@ -83,7 +83,7 @@ def expire_state(state, now):
     pending = state.get("pending")
     if pending and pending.expires < now:
         state.pop("pending", None)
-    for key in ("input", "receipt", "restore"):
+    for key in ("input", "receipt", "restore", "floating_create", "floating_delete"):
         value = state.get(key)
         if value and value.get("expires", float("inf")) < now:
             state.pop(key, None)
@@ -197,6 +197,109 @@ class Manager:
             if display.note:
                 text += '\n\n' + display.note
         return text
+
+    async def floating_create_preview(self, update, context, state):
+        nonce = secrets.token_hex(12)
+        context.user_data['floating_create'] = {
+            'nonce': nonce, 'actor': update.effective_user.id, 'pid': state['pid'],
+            'name': state['body']['name'], 'type': state['body']['type'],
+            'home_location': state['body']['home_location'],
+            'server': state['target_server_id'], 'expires': time.monotonic() + 120,
+        }
+        server = state['target_server']
+        await update.effective_message.reply_text(
+            tr('ساخت و اتصال Floating IP را تأیید کن؟\nنام: {0}\nنوع: {1}\nسرور: {2}\nریجن IP: {3}\nپس از ساخت، دستور موقت تنظیم IP برای سیستم‌عامل سرور نمایش داده می‌شود.',
+               state['body']['name'], state['body']['type'].upper(), server['name'], state['labels'].get('home_location', state['body']['home_location'])),
+            reply_markup=keyboard([[(tr('✅ ساخت و اتصال'), f'fipcreate:{nonce}'),
+                                   (tr('لغو'), 'cancel')]]))
+
+    async def wait_action(self, token, response):
+        action = response.get('action') or {}
+        for _ in range(60):
+            if action.get('status') == 'success':
+                return
+            if action.get('status') == 'error':
+                raise CloudError(tr('عملیات Floating IP در هتزنر ناموفق بود.'))
+            if not action.get('id'):
+                raise CloudError(tr('وضعیت عملیات Floating IP نامشخص است؛ IP و سرور را بررسی کنید.'))
+            await asyncio.sleep(1)
+            action = (await self.cloud.execute(token, BY_ID['get_action'],
+                                               {'path': {'id': action['id']}}))['action']
+        raise CloudError(tr('مهلت پیگیری عملیات Floating IP تمام شد؛ وضعیت IP و سرور را بررسی کنید.'))
+
+    async def create_floating_ip(self, update, context, pending):
+        project, token = await self.project(update, pending['pid'])
+        server = (await self.cloud.execute(token, BY_ID['get_server'],
+                                           {'path': {'id': pending['server']}}))['server']
+        family = pending['type']
+        if not (server.get('public_net', {}).get(family) or {}).get('ip'):
+            raise ValueError(tr('سرور دیگر Primary IP هم‌نوع ندارد؛ ساخت Floating IP لغو شد.'))
+        locations = await all_items(self.cloud, token, BY_ID['list_locations'], 'locations')
+        server_location = next((loc for loc in locations if loc.get('name') == location_name(server)), None)
+        target_location = next((loc for loc in locations if loc.get('name') == pending['home_location']), None)
+        if (not server_location or not target_location
+                or server_location.get('network_zone') != target_location.get('network_zone')):
+            raise ValueError(tr('ریجن انتخاب‌شده دیگر با Network Zone سرور سازگار نیست؛ ساخت را دوباره شروع کن.'))
+        await self.show(update, tr('در حال ساخت Floating IP و اتصال آن به سرور؛ لطفاً صبر کن.'), [])
+        result = await self.cloud.execute(token, BY_ID['create_floating_ip'], {'body': {
+            'name': pending['name'], 'type': family, 'home_location': pending['home_location']}})
+        floating = result['floating_ip']
+        try:
+            action = await self.cloud.execute(token, BY_ID['assign_floating_ip'], {
+                'path': {'id': floating['id']}, 'body': {'server': server['id']}})
+            await self.wait_action(token, action)
+        except CloudError:
+            await update.effective_message.reply_text(
+                tr('Floating IP ساخته شد اما اتصال به سرور تأیید نشد. IP: {0}\nوضعیت را در هتزنر بررسی کن؛ از فهرست Floating IP می‌توانی آن را مدیریت یا حذف کنی.', floating['ip']),
+                reply_markup=keyboard([[(tr('📋 کپی IP'), ('copy', floating['ip']))],
+                                       [(tr('🗑 حذف Floating IP'), f"fipdelete:{pending['pid']}:{floating['id']}")]]))
+            return
+        address = floating_setup_command(floating['ip'], family)
+        text = tr('✅ Floating IP ساخته و روی سرور ست شد.\nنام: {0}\nIP: {1}\nنوع: {2}\nسرور: {3}\nریجن: {4}\n\nدستور موقت تنظیم روی Linux (پس از ورود SSH اجرا کن):\n{5}\n\nاین تنظیم با ری‌استارت سرور پاک می‌شود.',
+                  floating.get('name', pending['name']), floating['ip'], family.upper(), server['name'],
+                  target_location.get('city') or target_location['name'], address)
+        await update.effective_message.reply_text(
+            text, reply_markup=keyboard([[(tr('📋 کپی IP'), ('copy', floating['ip']))],
+                                        [(tr('📋 کپی دستور تنظیم IP'), ('copy', address))]]))
+
+    async def floating_delete_prompt(self, update, context, pid, resource_id):
+        _, token = await self.project(update, pid)
+        floating = (await self.cloud.execute(token, BY_ID['get_floating_ip'],
+                                             {'path': {'id': int(resource_id)}}))['floating_ip']
+        server = floating.get('server')
+        if isinstance(server, dict):
+            server_id = server.get('id')
+        else:
+            server_id = server
+        nonce = secrets.token_hex(12)
+        context.user_data['floating_delete'] = {
+            'nonce': nonce, 'actor': update.effective_user.id, 'pid': pid,
+            'id': int(resource_id), 'ip': floating.get('ip', '—'),
+            'server': int(server_id) if server_id else None, 'expires': time.monotonic() + 120,
+        }
+        await update.effective_message.reply_text(
+            tr('Floating IP {0} حذف شود؟ اگر به سروری وصل باشد، ابتدا Unassign و سپس Delete می‌شود. این کار IP را برای همیشه آزاد می‌کند.', floating.get('ip', resource_id)),
+            reply_markup=keyboard([[(tr('✅ جداسازی و حذف'), f'fipdeleteyes:{nonce}'),
+                                   (tr('لغو'), f'item:{pid}:{COLLECTIONS.index(("floating_ips", "Floating IP"))}:{resource_id}:0')]]))
+
+    async def delete_floating_ip(self, update, context, pending):
+        _, token = await self.project(update, pending['pid'])
+        floating = (await self.cloud.execute(token, BY_ID['get_floating_ip'],
+                                             {'path': {'id': pending['id']}}))['floating_ip']
+        server = floating.get('server')
+        server_id = server.get('id') if isinstance(server, dict) else server
+        if server_id:
+            await self.show(update, tr('در حال جداکردن Floating IP از سرور و حذف آن؛ لطفاً صبر کن.'), [])
+            action = await self.cloud.execute(token, BY_ID['unassign_floating_ip'],
+                                              {'path': {'id': pending['id']}})
+            await self.wait_action(token, action)
+            floating = (await self.cloud.execute(token, BY_ID['get_floating_ip'],
+                                                 {'path': {'id': pending['id']}}))['floating_ip']
+            if floating.get('server'):
+                raise CloudError(tr('Floating IP هنوز به سرور متصل است؛ حذف انجام نشد.'))
+        await self.cloud.execute(token, BY_ID['delete_floating_ip'], {'path': {'id': pending['id']}})
+        await update.effective_message.reply_text(tr('Floating IP {0} جدا و حذف شد.', pending['ip']))
+        await self.simple_screen(update, context, pending['pid'], 'ips', ['floating', '1'])
 
     async def project(self, update, pid):
         if not self.authorized(update):
@@ -565,8 +668,26 @@ class Manager:
         parameter = resource_id if key == 'id_or_name' else int(resource_id)
         if page == 0:
             result = await self.cloud.execute(token, get, {"path": {key: parameter}})
-            await self.send_json(update, redact(result, (token,)))
             resource = next(iter(result.values()), None)
+            if collection == 'floating_ips' and isinstance(resource, dict):
+                server_value = resource.get('server')
+                server_id = server_value.get('id') if isinstance(server_value, dict) else server_value
+                server_name = tr('متصل نیست')
+                if server_id:
+                    server_name = (await self.cloud.execute(token, BY_ID['get_server'],
+                                                            {'path': {'id': int(server_id)}}))['server']['name']
+                home = resource.get('home_location') or {}
+                region = (home.get('city') or home.get('name') or home.get('id')
+                          if isinstance(home, dict) else home) or tr('نامشخص')
+                text = tr('🌐 Floating IP\nسرور ست‌شده: {0}\nریجن: {1}', server_name, region)
+                rows = []
+                if resource.get('ip') and len(resource['ip']) <= 256:
+                    rows.append([(tr('📋 کپی IP'), ('copy', resource['ip']))])
+                rows.append([(tr('🗑 حذف Floating IP'), f'fipdelete:{pid}:{resource_id}')])
+                rows.append([(tr('بازگشت'), f'ips:{pid}:floating:1')])
+                await self.show(update, text, rows)
+                return
+            await self.send_json(update, redact(result, (token,)))
             if collection in {'floating_ips', 'primary_ips'} and isinstance(resource, dict) and resource.get('ip'):
                 await update.effective_message.reply_text(
                     tr('🌐 IP: {0}', resource['ip']),
@@ -735,6 +856,27 @@ class Manager:
                 await asyncio.to_thread(self.store.set_display_currency, update.effective_user.id, data[1])
             await self.currency_settings(update, context)
             return
+        if kind == 'fipcreate':
+            pending = context.user_data.get('floating_create')
+            if (not pending or pending.get('actor') != update.effective_user.id
+                    or pending['expires'] < time.monotonic()
+                    or not secrets.compare_digest(pending['nonce'], data[1])):
+                context.user_data.pop('floating_create', None)
+                raise ValueError(tr('مهلت تأیید Floating IP تمام شده یا دکمه معتبر نیست.'))
+            context.user_data.pop('floating_create', None)
+            context.user_data.pop('input', None)
+            await self.create_floating_ip(update, context, pending)
+            return
+        if kind == 'fipdeleteyes':
+            pending = context.user_data.get('floating_delete')
+            if (not pending or pending.get('actor') != update.effective_user.id
+                    or pending['expires'] < time.monotonic()
+                    or not secrets.compare_digest(pending['nonce'], data[1])):
+                context.user_data.pop('floating_delete', None)
+                raise ValueError(tr('مهلت تأیید Floating IP تمام شده یا دکمه معتبر نیست.'))
+            context.user_data.pop('floating_delete', None)
+            await self.delete_floating_ip(update, context, pending)
+            return
         if kind in {'admins', 'admin', 'adminadd', 'admingrants', 'adminpick', 'adminremove', 'adminconfirm'}:
             await self.admins.callback(update, context, data)
             return
@@ -818,11 +960,8 @@ class Manager:
         elif kind in {'new', 'do'}:
             operation_index = int(data[2])
             operation = OPERATIONS[operation_index]['id']
-            if kind == 'new' and operation == 'create_floating_ip':
-                await self.forms.start(update, context, pid, operation_index)
-            else:
-                await self.simple.start(update, context, pid, operation,
-                                        data[3] if kind == 'do' else None)
+            await self.simple.start(update, context, pid, operation,
+                                    data[3] if kind == 'do' else None)
         elif kind == 'restore':
             await self.simple.start(update, context, pid, 'rebuild_server', image_id=int(data[2]))
         elif kind == 'net':
@@ -868,6 +1007,8 @@ class Manager:
                 rows.append([(tr('حذف اتصال این پروژه از بات'), f'forget:{pid}')])
             rows.append([(tr('بازگشت'), f'p:{pid}')])
             await self.show(update, tr('⚙️ تنظیمات {0}', name), rows)
+        elif kind == 'fipdelete':
+            await self.floating_delete_prompt(update, context, pid, int(data[2]))
         elif kind in {'projectname', 'projecttoken'}:
             await self.require_project_owner(update, pid)
             expires = time.monotonic() + 600
