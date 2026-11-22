@@ -471,8 +471,17 @@ class Manager:
                                       section_names.get(section, tr('تغییرات سرور'))), rows)
             return
         if kind in {'images', 'ips'}:
-            page = int(args[-1])
-            collection = 'images' if kind == 'images' else 'primary_ips'
+            ip_type = 'primary'
+            if kind == 'images':
+                page = int(args[-1])
+                collection = 'images'
+            else:
+                if args and args[0] in {'primary', 'floating'}:
+                    ip_type = args[0]
+                    page = int(args[1]) if len(args) > 1 else 1
+                else:
+                    page = int(args[-1]) if args else 1
+                collection = 'floating_ips' if ip_type == 'floating' else 'primary_ips'
             query = {'page': page, 'per_page': 8}
             if kind == 'images':
                 query['type'] = [args[0]]
@@ -482,9 +491,12 @@ class Manager:
                 label = item.get('name') or item.get('description') or str(item['id'])
                 if kind == 'ips':
                     label += f" · {item.get('ip', tr('در حال تخصیص'))}"
-                rows.append([(label, f"{'pic' if kind == 'images' else 'ip'}:{pid}:{item['id']}")])
+                callback = (f"pic:{pid}:{item['id']}" if kind == 'images' else
+                            f"item:{pid}:{COLLECTIONS.index(('floating_ips', 'Floating IP'))}:{item['id']}:0"
+                            if ip_type == 'floating' else f"ip:{pid}:{item['id']}")
+                rows.append([(label, callback)])
             nav = []
-            prefix = f'images:{pid}:{args[0]}' if kind == 'images' else f'ips:{pid}'
+            prefix = f'images:{pid}:{args[0]}' if kind == 'images' else f'ips:{pid}:{ip_type}'
             if page > 1:
                 nav.append((tr('قبلی'), f'{prefix}:{page - 1}'))
             if result.get('meta', {}).get('pagination', {}).get('next_page'):
@@ -496,8 +508,12 @@ class Manager:
                          [action(tr('➕ ساخت اسنپ\u200cشات'), 'create_server_image')]]
                 heading = tr('اسنپ\u200cشات\u200cها') if args[0] == 'snapshot' else tr('بکاپ\u200cهای خودکار')
             else:
-                rows.append([action(tr('➕ ساخت IP'), 'create_primary_ip')])
-                heading = tr('آدرس\u200cهای IP')
+                rows.append([(tr('➕ ساخت Floating IP'), f"new:{pid}:{OPERATIONS.index(BY_ID['create_floating_ip'])}")]
+                            if ip_type == 'floating' else
+                            [(tr('➕ ساخت Primary IP'), f"new:{pid}:{OPERATIONS.index(BY_ID['create_primary_ip'])}")])
+                rows.append([(tr('📍 Primary IPها'), f'ips:{pid}:primary:1'),
+                             (tr('🌐 Floating IPها'), f'ips:{pid}:floating:1')])
+                heading = tr('Floating IPها') if ip_type == 'floating' else tr('Primary IPها')
             rows.append([(tr('🔄 تازه\u200cسازی'), f'{prefix}:{page}'), (tr('بازگشت'), f'p:{pid}')])
             await self.show(update, tr('{0}\nپروژه: {1}\n', heading, project) + (tr('یک مورد را انتخاب کن.') if result[collection] else tr('هنوز موردی وجود ندارد.')), rows)
             return
