@@ -24,7 +24,11 @@ class Store:
             db.execute("""CREATE TABLE IF NOT EXISTS ip_changes (
                 project TEXT NOT NULL, server INTEGER NOT NULL, owner INTEGER NOT NULL,
                 family TEXT NOT NULL, old_ip INTEGER, new_ip INTEGER,
+                server_was_running INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(project, server))""")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(ip_changes)')}
+            if 'server_was_running' not in columns:
+                db.execute('ALTER TABLE ip_changes ADD COLUMN server_was_running INTEGER NOT NULL DEFAULT 0')
             db.execute("""CREATE TABLE IF NOT EXISTS admins (
                 owner INTEGER NOT NULL, admin INTEGER NOT NULL, name TEXT NOT NULL,
                 PRIMARY KEY(owner, admin))""")
@@ -167,14 +171,14 @@ class Store:
             db.execute('INSERT INTO price_preferences VALUES (?, ?) ON CONFLICT(owner) DO UPDATE SET currency=excluded.currency',
                        (owner, currency))
 
-    def begin_ip_change(self, owner, project, server, family, old_ip, new_ip):
+    def begin_ip_change(self, owner, project, server, family, old_ip, new_ip, server_was_running=False):
         with self.connect() as db:
-            db.execute('INSERT INTO ip_changes VALUES (?, ?, ?, ?, ?, ?)',
-                       (project, server, owner, family, old_ip, new_ip))
+            db.execute('INSERT INTO ip_changes (project, server, owner, family, old_ip, new_ip, server_was_running) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       (project, server, owner, family, old_ip, new_ip, bool(server_was_running)))
 
     def ip_changes(self):
         with self.connect() as db:
-            return db.execute('SELECT owner, project, server, family, old_ip, new_ip FROM ip_changes').fetchall()
+            return db.execute('SELECT owner, project, server, family, old_ip, new_ip, server_was_running FROM ip_changes').fetchall()
 
     def finish_ip_change(self, project, server):
         with self.connect() as db:

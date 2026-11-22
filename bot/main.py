@@ -239,22 +239,30 @@ class Manager:
             rows.append([(tr('تعویض {0}', family.upper()), f'ipset:{pid}:{server_id}:{family}')])
             if (server.get('public_net', {}).get(family) or {}).get('id'):
                 rows[-1].append((tr('جداسازی {0}', family.upper()), f'ipdetach:{pid}:{server_id}:{family}'))
+            if server.get('status') == 'running':
+                rows.append([(tr('🔁 تعویض خودکار {0}', family.upper()),
+                              f'ipauto:{pid}:{server_id}:{family}')])
         rows += [[(tr('➕ ساخت IP'), f"new:{pid}:{OPERATIONS.index(BY_ID['create_primary_ip'])}")],
                  [(tr('بازیابی IP ناتمام'), f'iprecover:{pid}:{server_id}')], [(tr('بازگشت به سرور'), f'srv:{pid}:{server_id}')]]
-        await self.show(update, await self.server_text(update.effective_user.id, project, token, server) + tr('\n\nبرای تغییر IP، سرور باید خاموش باشد. IP جداشده حذف نمی\u200cشود و ممکن است همچنان هزینه داشته باشد.'), rows)
+        guidance = (tr('\n\nبرای تعویض دستی یا جداسازی IP، سرور باید خاموش باشد. IP جداشده حذف نمی\u200cشود و ممکن است همچنان هزینه داشته باشد.')
+                    if server.get('status') == 'off' else
+                    tr('\n\nبرای تعویض خودکار، سرور روشن باشد؛ بات آن را نرم خاموش می\u200cکند و پس از تعویض IP دوباره روشن می\u200cکند.'))
+        await self.show(update, await self.server_text(update.effective_user.id, project, token, server) + guidance, rows)
 
-    async def ip_pick(self, update, context, pid, server_id, family):
+    async def ip_pick(self, update, context, pid, server_id, family, auto_restart=False):
         _, token = await self.project(update, pid)
         server = await self.ip_control.server(token, server_id)
-        if family not in {'ipv4', 'ipv6'} or server['status'] != 'off' or server.get('locked'):
-            raise ValueError(tr('برای تغییر یا جداسازی IP، ابتدا سرور را خاموش کنید.'))
+        expected_status = 'running' if auto_restart else 'off'
+        if family not in {'ipv4', 'ipv6'} or server['status'] != expected_status or server.get('locked'):
+            raise ValueError(tr('وضعیت سرور با روش تعویض IP سازگار نیست؛ وضعیت را تازه‌سازی کنید.'))
         location = location_name(server)
         ips = await all_items(self.cloud, token, BY_ID['list_primary_ips'], 'primary_ips')
         options = [ip for ip in ips if ip['type'] == family and ip.get('assignee_id') is None
                    and location_name(ip) == location]
         nonce = secrets.token_hex(8)
         context.user_data['input'] = {'kind': 'ip_pick', 'pid': pid, 'server': server_id, 'family': family,
-                                      'options': options, 'nonce': nonce, 'expires': time.monotonic() + 600, 'page': 0}
+                                      'options': options, 'nonce': nonce, 'expires': time.monotonic() + 600, 'page': 0,
+                                      'auto_restart': auto_restart}
         await self.pick_screen(update, context)
 
     async def pick_screen(self, update, context):
@@ -274,20 +282,28 @@ class Manager:
         rows.append([(tr('بازگشت به سرور'), f"srv:{state['pid']}:{state['server']}")])
         await self.show(update, tr('یک گزینهٔ موجود را انتخاب کنید.') if options else tr('گزینهٔ سازگار و آزادی پیدا نشد.'), rows)
 
-    async def ip_preview(self, update, context, pid, server_id, family, new_id):
+    async def ip_preview(self, update, context, pid, server_id, family, new_id, auto_restart=False):
         project, token = await self.project(update, pid)
         server = await self.ip_control.server(token, server_id)
-        if server['status'] != 'off' or server.get('locked'):
-            raise ValueError(tr('برای تغییر یا جداسازی IP، ابتدا سرور را خاموش کنید.'))
+        expected_status = 'running' if auto_restart else 'off'
+        if server['status'] != expected_status or server.get('locked'):
+            raise ValueError(tr('وضعیت سرور با روش تعویض IP سازگار نیست؛ وضعیت را تازه‌سازی کنید.'))
+        if auto_restart and new_id is None:
+            raise ValueError(tr('تعویض خودکار فقط با انتخاب IP جایگزین انجام می‌شود.'))
         old = server.get('public_net', {}).get(family) or {}
         if old.get('id') == new_id:
             raise ValueError(tr('IP انتخاب\u200cشده تغییری ایجاد نمی\u200cکند.'))
         target = await self.ip_control.ip(token, new_id) if new_id is not None else None
         self.reset(context)
         pending = Pending(secrets.token_hex(12), pid, 'ip_change',
-                          {'server': server_id, 'family': family, 'new_ip': new_id, 'old_ip': old.get('id')}, time.monotonic() + 120, True)
+                          {'server': server_id, 'family': family, 'new_ip': new_id, 'old_ip': old.get('id'),
+                           'auto_restart': auto_restart}, time.monotonic() + 120, True)
         context.user_data['pending'] = pending
-        await self.show(update, tr('تعویض / جداسازی IP\nپروژه: {0}\nسرور: {1}\nنوع: {2}\nIP قبلی: {3}\nIP جدید: {4}\n\nIP قبلی حذف نمی\u200cشود. تغییر اتصال سرور را قطع می\u200cکند و ممکن است هزینه داشته باشد. انجام شود؟', project, server['name'], family.upper(), old.get('ip', tr('ندارد')), target['ip'] if target else tr('بدون IP')), [[(tr('✅ تأیید و انجام'), f'yes:{pending.nonce}'), (tr('✖️ انصراف'), f'net:{pid}:{server_id}')]])
+        if auto_restart:
+            description = tr('🔁 تعویض خودکار IP\nپروژه: {0}\nسرور: {1}\nنوع: {2}\nIP قبلی: {3}\nIP جدید: {4}\n\nسرور به‌صورت نرم خاموش می‌شود، IP عوض می‌شود و پس از موفقیت دوباره روشن می‌شود. اگر مرحله‌ای ناموفق شود، بازیابی خودکار تلاش می‌کند IP قبلی و وضعیت روشن سرور را برگرداند.', project, server['name'], family.upper(), old.get('ip', tr('ندارد')), target['ip'])
+        else:
+            description = tr('تعویض / جداسازی IP\nپروژه: {0}\nسرور: {1}\nنوع: {2}\nIP قبلی: {3}\nIP جدید: {4}\n\nIP قبلی حذف نمی\u200cشود. تغییر اتصال سرور را قطع می\u200cکند و ممکن است هزینه داشته باشد. انجام شود؟', project, server['name'], family.upper(), old.get('ip', tr('ندارد')), target['ip'] if target else tr('بدون IP'))
+        await self.show(update, description, [[(tr('✅ تأیید و انجام'), f'yes:{pending.nonce}'), (tr('✖️ انصراف'), f'net:{pid}:{server_id}')]])
 
     async def bind_resource(self, update, context, pid, server_id, category):
         _, token = await self.project(update, pid)
@@ -322,7 +338,8 @@ class Manager:
             return
         item = state['options'][int(data[3])]
         if state['kind'] == 'ip_pick':
-            await self.ip_preview(update, context, state['pid'], state['server'], state['family'], item['id'])
+            await self.ip_preview(update, context, state['pid'], state['server'], state['family'], item['id'],
+                                  state.get('auto_restart', False))
             return
         server_id = state['server']
         operation, body = {
@@ -661,9 +678,13 @@ class Manager:
             pending = consume_pending(context.user_data, data[1])
             if pending.operation == 'ip_change':
                 await self.project(update, pending.project)
-                await self.show(update, tr('در حال تغییر IP؛ لطفاً صبر کنید و سرور را خاموش نگه دارید.'), [])
+                progress = (tr('در حال خاموش‌کردن سرور، تعویض IP و روشن‌کردن دوباره؛ لطفاً صبر کنید.')
+                            if pending.payload.get('auto_restart') else
+                            tr('در حال تغییر IP؛ لطفاً صبر کنید و سرور را خاموش نگه دارید.'))
+                await self.show(update, progress, [])
                 await self.ip_control.change(update.effective_user.id, pending.project, pending.payload['server'],
-                                             pending.payload['family'], pending.payload['new_ip'], pending.payload['old_ip'])
+                                             pending.payload['family'], pending.payload['new_ip'], pending.payload['old_ip'],
+                                             pending.payload.get('auto_restart', False))
                 await self.ip_menu(update, pending.project, pending.payload['server'])
             elif pending.operation == "forget":
                 await self.require_project_owner(update, pending.project)
@@ -680,7 +701,7 @@ class Manager:
                 context.user_data.clear()
             else:
                 self.reset(context)
-            if kind in {'srv', 'sub', 'net', 'ipset', 'ipdetach', 'bind'}:
+            if kind in {'srv', 'sub', 'net', 'ipset', 'ipdetach', 'ipauto', 'bind'}:
                 context.user_data['nav'] = {'pid': pid, 'server': int(data[2])}
         if kind == "p":
             await self.menu(update, pid)
@@ -711,6 +732,8 @@ class Manager:
             await self.simple_screen(update, context, pid, 'sub', [server_id, 'graphs'])
         elif kind == 'ipset':
             await self.ip_pick(update, context, pid, int(data[2]), data[3])
+        elif kind == 'ipauto':
+            await self.ip_pick(update, context, pid, int(data[2]), data[3], auto_restart=True)
         elif kind == 'ipdetach':
             await self.ip_preview(update, context, pid, int(data[2]), data[3], None)
         elif kind == 'iprecover':
@@ -959,7 +982,7 @@ def main():
             LANGUAGE.set(manager.languages.get(principal, 'fa'))
             try:
                 outcome = await manager.ip_control.recover(row)
-                text = tr('تغییر IP ناتمام بررسی و بازیابی شد.') if outcome else tr('تغییر IP ناتمام است؛ سرور را خاموش نگه دارید و بازیابی IP را بررسی کنید.')
+                text = tr('تغییر IP ناتمام بررسی و بازیابی شد.') if outcome else tr('تغییر IP ناتمام است؛ وضعیت سرور و IP را بررسی کنید و دکمهٔ بازیابی را بزنید.')
             except Exception:
                 logging.error('ip_recovery_failed project=%s server=%s', row[1], row[2])
                 text = tr('بازیابی IP انجام نشد؛ وضعیت سرور را بررسی کنید.')
