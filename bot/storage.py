@@ -129,6 +129,22 @@ class Store:
                        (project_id, owner, name.strip(), self.cipher.encrypt(token.encode())))
         return project_id
 
+    def rename_project(self, owner: int, project_id: str, name: str):
+        if not name.strip() or len(name.strip()) > 60:
+            raise ValueError(tr('نام پروژه باید بین ۱ تا ۶۰ حرف باشد.'))
+        with self.connect() as db:
+            result = db.execute('UPDATE projects SET name=? WHERE owner=? AND id=?',
+                                (name.strip(), owner, project_id))
+            if result.rowcount != 1:
+                raise ValueError(tr('پروژه پیدا نشد یا اجازهٔ دسترسی ندارید.'))
+
+    def replace_token(self, owner: int, project_id: str, token: str):
+        with self.connect() as db:
+            result = db.execute('UPDATE projects SET token=? WHERE owner=? AND id=?',
+                                (self.cipher.encrypt(token.encode()), owner, project_id))
+            if result.rowcount != 1:
+                raise ValueError(tr('پروژه پیدا نشد یا اجازهٔ دسترسی ندارید.'))
+
     def list(self, owner: int):
         with self.connect() as db:
             return db.execute("""SELECT p.id, p.name FROM projects p WHERE p.owner=? OR EXISTS (

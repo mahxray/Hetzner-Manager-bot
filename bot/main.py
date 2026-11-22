@@ -239,7 +239,7 @@ class Manager:
     async def help(self, update, context):
         if not self.authorized(update):
             return
-        await update.effective_message.reply_text(tr('/projects — پروژه\u200cها\n/add — افزودن پروژه\n/backup — دریافت پشتیبان داده‌های بات\n/restore — بازیابی پشتیبان بات\n/cancel — لغو ورودی و تأیید\n۱. پروژه\u200cات را انتخاب کن.\n۲. وارد سرورها، اسنپ\u200cشات\u200cها یا IPها شو.\n۳. منبع و کار مورد نظر را انتخاب کن؛ بات مرحله\u200cبه\u200cمرحله راهنمایی می\u200cکند.\nساخت سرور: نام ← کشور ← پلن موجود ← سیستم\u200cعامل ← کلید SSH ← تأیید.\nابزارهای تخصصی در تنظیمات پروژه ← بخش پیشرفته هستند.\nهر تغییر نیازمند تأیید ۲ دقیقه\u200cای است. پاسخ running به معنی پایان عملیات نیست؛ دکمهٔ پیگیری را بزنید. پاسخ محرمانه فقط با درخواست جدا نمایش داده می\u200cشود.'))
+        await update.effective_message.reply_text(tr('/projects — پروژه\u200cها\n/add — افزودن پروژه\n/backup — دریافت پشتیبان داده‌های بات\n/restore — بازیابی پشتیبان بات\n/cancel — لغو ورودی و تأیید\n۱. پروژه\u200cات را انتخاب کن.\n۲. وارد سرورها، اسنپ\u200cشات\u200cها یا IPها شو.\n۳. منبع و کار مورد نظر را انتخاب کن؛ بات مرحله\u200cبه\u200cمرحله راهنمایی می\u200cکند.\nساخت سرور: نام ← کشور ← پلن موجود ← سیستم\u200cعامل ← کلید SSH ← تأیید.\nتغییر نام و API key هر پروژه از تنظیمات همان پروژه انجام می‌شود.\nهر تغییر نیازمند تأیید ۲ دقیقه\u200cای است. پاسخ running به معنی پایان عملیات نیست؛ دکمهٔ پیگیری را بزنید. پاسخ محرمانه فقط با درخواست جدا نمایش داده می\u200cشود.'))
 
     async def backup(self, update, context):
         if not self.authorized(update):
@@ -807,7 +807,7 @@ class Manager:
         pid = data[1]
         name, token = await self.project(update, pid)
         if kind not in {"schema"}:
-            if kind in {'p', 'resources', 'servers', 'settings', 'advanced'}:
+            if kind in {'p', 'resources', 'servers', 'settings'}:
                 context.user_data.clear()
             else:
                 self.reset(context)
@@ -816,8 +816,13 @@ class Manager:
         if kind == "p":
             await self.menu(update, pid)
         elif kind in {'new', 'do'}:
-            await self.simple.start(update, context, pid, OPERATIONS[int(data[2])]['id'],
-                                    data[3] if kind == 'do' else None)
+            operation_index = int(data[2])
+            operation = OPERATIONS[operation_index]['id']
+            if kind == 'new' and operation == 'create_floating_ip':
+                await self.forms.start(update, context, pid, operation_index)
+            else:
+                await self.simple.start(update, context, pid, operation,
+                                        data[3] if kind == 'do' else None)
         elif kind == 'restore':
             await self.simple.start(update, context, pid, 'rebuild_server', image_id=int(data[2]))
         elif kind == 'net':
@@ -855,14 +860,23 @@ class Manager:
         elif kind == 'bind':
             await self.bind_resource(update, context, pid, int(data[2]), data[3])
         elif kind == 'settings':
-            rows = [[(tr('🌐 زبان / Language'), 'language')], [(tr('🧰 بخش پیشرفته'), f'advanced:{pid}')]]
+            rows = [[(tr('🌐 زبان / Language'), 'language')]]
             rows.insert(1, [(tr('💱 واحد قیمت'), 'currency')])
             if update.effective_user.id in self.allowed and await asyncio.to_thread(self.store.is_owner, update.effective_user.id, pid):
+                rows.insert(0, [(tr('✏️ تغییر نام پروژه'), f'projectname:{pid}')])
+                rows.insert(1, [(tr('🔑 ویرایش API key'), f'projecttoken:{pid}')])
                 rows.append([(tr('حذف اتصال این پروژه از بات'), f'forget:{pid}')])
             rows.append([(tr('بازگشت'), f'p:{pid}')])
             await self.show(update, tr('⚙️ تنظیمات {0}', name), rows)
-        elif kind == 'advanced':
-            await self.show(update, tr('🧰 ابزارهای پیشرفتهٔ {0}\nبرای کارهای روزمره از منوی اصلی استفاده کن.', name), [[(tr('شبکه، فایروال، دیسک، DNS و سایر منابع'), f'resources:{pid}')], [(tr('تمام عملیات و ورودی تخصصی'), f'tags:{pid}:0')], [(tr('بازگشت'), f'p:{pid}')]])
+        elif kind in {'projectname', 'projecttoken'}:
+            await self.require_project_owner(update, pid)
+            expires = time.monotonic() + 600
+            if kind == 'projectname':
+                context.user_data['input'] = {'kind': 'project_rename', 'pid': pid, 'expires': expires}
+                await update.effective_message.reply_text(tr('نام جدید پروژه را بفرستید؛ نام باید بین ۱ تا ۶۰ حرف باشد. /cancel'))
+            else:
+                context.user_data['input'] = {'kind': 'project_token', 'pid': pid, 'expires': expires}
+                await update.effective_message.reply_text(tr('API key جدید همین پروژه را بفرستید. پیام حذف و کلید پیش از ذخیره با هتزنر بررسی می‌شود. کلید قبلی در هتزنر باطل نمی‌شود. /cancel'))
         elif kind in {'images', 'ips', 'pic', 'ip', 'sub'}:
             await self.simple_screen(update, context, pid, kind, data[2:])
         elif kind == "resources":
@@ -969,6 +983,37 @@ class Manager:
         text = supplied_text if supplied_text is not None else update.effective_message.text.strip()
         if state['kind'].startswith('admin_'):
             await self.admins.text(update, context, text)
+            return
+        if state['kind'] in {'project_rename', 'project_token'}:
+            self.require_owner(update)
+            pid = state['pid']
+            await self.require_project_owner(update, pid)
+            if state['kind'] == 'project_token':
+                try:
+                    await update.effective_message.delete()
+                except TelegramError:
+                    await update.effective_message.reply_text(tr('حذف پیام ممکن نشد؛ پیام API key را دستی پاک کنید.'))
+            if state['expires'] < time.monotonic():
+                context.user_data.clear()
+                raise ValueError(tr('مهلت ورود تمام شد؛ عملیات را دوباره شروع کنید.'))
+            if state['kind'] == 'project_rename':
+                if not text.strip() or len(text.strip()) > 60:
+                    raise ValueError(tr('نام پروژه باید بین ۱ تا ۶۰ حرف باشد.'))
+                try:
+                    await asyncio.to_thread(self.store.rename_project, update.effective_user.id, pid, text)
+                except sqlite3.IntegrityError:
+                    raise ValueError(tr('این نام پروژه قبلاً ثبت شده؛ نام دیگری انتخاب کنید.')) from None
+                context.user_data.clear()
+                await self.menu(update, pid)
+            else:
+                if not text.isascii() or not text.isalnum() or not 32 <= len(text) <= 256:
+                    context.user_data.clear()
+                    raise ValueError(tr('قالب API key نامعتبر است؛ /cancel و دوباره تلاش کنید.'))
+                await self.cloud.execute(text, BY_ID['list_servers'], {'query': {'per_page': 1}})
+                await asyncio.to_thread(self.store.replace_token, update.effective_user.id, pid, text)
+                context.user_data.clear()
+                await update.effective_message.reply_text(tr('API key این پروژه با موفقیت جایگزین شد.'))
+                await self.menu(update, pid)
             return
         if state['kind'] in {'name', 'token'}:
             self.require_owner(update)
