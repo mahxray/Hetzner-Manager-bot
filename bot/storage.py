@@ -50,6 +50,76 @@ class Store:
         finally:
             connection.close()
 
+    def backup(self, destination, owner):
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source = sqlite3.connect(self.path, timeout=10)
+        output = sqlite3.connect(target, timeout=10)
+        try:
+            source.backup(output)
+        finally:
+            output.close()
+            source.close()
+        with sqlite3.connect(target) as db:
+            db.execute('PRAGMA foreign_keys=ON')
+            db.execute('DELETE FROM project_grants WHERE granted_by<>? OR project NOT IN (SELECT id FROM projects WHERE owner=?)',
+                       (owner, owner))
+            db.execute('DELETE FROM ip_changes')
+            db.execute('DELETE FROM admins WHERE owner<>?', (owner,))
+            db.execute('DELETE FROM projects WHERE owner<>?', (owner,))
+            db.execute('DELETE FROM preferences WHERE owner<>?', (owner,))
+            db.execute('DELETE FROM price_preferences WHERE owner<>?', (owner,))
+        if os.name != "nt":
+            target.chmod(0o600)
+
+    def validate_backup(self, source_path, owner):
+        source = sqlite3.connect(f"file:{Path(source_path).resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            if source.execute('PRAGMA quick_check').fetchone() != ('ok',):
+                raise ValueError(tr('فایل پشتیبان سالم نیست.'))
+            tables = {row[0] for row in source.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            required = {'projects', 'preferences', 'price_preferences', 'ip_changes', 'admins', 'project_grants'}
+            if not required <= tables:
+                raise ValueError(tr('این فایل، پشتیبان سازگار بات نیست.'))
+            projects = source.execute('SELECT id, owner, name, token FROM projects').fetchall()
+            for _, row_owner, name, token in projects:
+                if not isinstance(row_owner, int) or not isinstance(name, str) or not name or not isinstance(token, bytes):
+                    raise ValueError(tr('اطلاعات پروژه در فایل پشتیبان معتبر نیست.'))
+                self.cipher.decrypt(token)
+            owners = [row[1] for row in projects]
+            owners += [row[0] for row in source.execute('SELECT owner FROM preferences')]
+            owners += [row[0] for row in source.execute('SELECT owner FROM price_preferences')]
+            owners += [row[2] for row in source.execute('SELECT project, server, owner FROM ip_changes')]
+            owners += [row[0] for row in source.execute('SELECT owner FROM admins')]
+            owners += [row[2] for row in source.execute('SELECT project, admin, granted_by FROM project_grants')]
+            if any(value != owner for value in owners):
+                raise ValueError(tr('پشتیبان متعلق به مالک دیگری است.'))
+            return {table: source.execute(f'SELECT * FROM "{table}"').fetchall()
+                    for table in required}
+        except (sqlite3.Error, TypeError) as error:
+            raise ValueError(tr('فایل پشتیبان قابل خواندن یا معتبر نیست.')) from error
+        finally:
+            source.close()
+
+    def restore(self, source_path, owner):
+        tables = self.validate_backup(source_path, owner)
+        with self.connect() as db:
+            if db.execute('SELECT 1 FROM ip_changes WHERE owner=? LIMIT 1', (owner,)).fetchone():
+                raise ValueError(tr('ابتدا تغییر IP ناتمام را بازیابی کنید؛ سپس پشتیبان را برگردانید.'))
+            db.execute('DELETE FROM project_grants WHERE granted_by=? OR project IN (SELECT id FROM projects WHERE owner=?)',
+                       (owner, owner))
+            db.execute('DELETE FROM ip_changes WHERE owner=? OR project IN (SELECT id FROM projects WHERE owner=?)',
+                       (owner, owner))
+            db.execute('DELETE FROM admins WHERE owner=?', (owner,))
+            db.execute('DELETE FROM projects WHERE owner=?', (owner,))
+            db.execute('DELETE FROM preferences WHERE owner=?', (owner,))
+            db.execute('DELETE FROM price_preferences WHERE owner=?', (owner,))
+            for table in ('projects', 'preferences', 'price_preferences', 'ip_changes', 'admins', 'project_grants'):
+                if tables[table]:
+                    columns = len(tables[table][0])
+                    db.executemany(f'INSERT INTO "{table}" VALUES ({",".join("?" for _ in range(columns))})',
+                                   tables[table])
+
     def add(self, owner: int, name: str, token: str) -> str:
         if not name.strip() or len(name) > 60:
             raise ValueError(tr('نام پروژه باید بین ۱ تا ۶۰ حرف باشد.'))

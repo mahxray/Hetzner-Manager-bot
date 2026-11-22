@@ -47,7 +47,7 @@ class Quote:
         rate = format(self.factor.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP), ',.2f')
         stamp = (self.observed.astimezone(TEHRAN).strftime('%Y-%m-%d %H:%M Asia/Tehran')
                  if isinstance(self.observed, datetime) else self.observed.isoformat())
-        return tr('نرخ: 1 {0} = {1} {2}\nمنبع: {3}\nتاریخ/زمان نرخ: {4}\nقیمت تبدیل‌شده تخمینی است.',
+        return tr('نرخ: 1 {0} = {1} {2}\nتاریخ/زمان نرخ: {4} · {3}\nقیمت تبدیل‌شده تخمینی است.',
                   self.base, rate, unit, self.provider, stamp)
 
 

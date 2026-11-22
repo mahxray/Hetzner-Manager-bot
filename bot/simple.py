@@ -12,6 +12,19 @@ STATUS = {'running': '🟢 روشن', 'off': '🔴 خاموش', 'starting': '�
           'rebuilding': '🟡 در حال نصب مجدد', 'deleting': 'در حال حذف'}
 
 
+def location_flag(location):
+    if isinstance(location, dict):
+        country = location.get('country')
+        name = location.get('name', '')
+    else:
+        country, name = None, str(location or '')
+    country = country or {'fsn1': 'DE', 'nbg1': 'DE', 'hel1': 'FI', 'ash': 'US',
+                          'hil': 'US', 'sin': 'SG', 'tyo': 'JP'}.get(name.lower().split('-')[0])
+    if not isinstance(country, str) or len(country) != 2 or not country.isascii() or not country.isalpha():
+        return ''
+    return ''.join(chr(127397 + ord(letter.upper())) for letter in country)
+
+
 def compatible_plan(plan, server):
     current = server.get('server_type') or {}
     if current.get('architecture') and plan.get('architecture') != current['architecture']:
@@ -30,7 +43,9 @@ def server_card(server, project):
     location = server.get('location') or (server.get('datacenter') or {}).get('location') or {}
     image = server.get('image') or {}
     gb = lambda n: f'{(n or 0) / 1024**3:.1f}'
+    flag = location_flag(location)
     location_label = location if isinstance(location, str) else location.get('city') or location.get('name', '—')
+    location_label = f'{flag} {location_label}'.strip()
     return (tr('🖥 {0}\nپروژه: {1}\nوضعیت: {2}\n\nIPv4: {3}\nIPv6: {4}\nموقعیت: {5}\nپلن: {6} · {7} هسته · {8} GB RAM\nدیسک: {9} GB\nسیستم\u200cعامل: {10}\nترافیک خروجی: {11} GB\nبکاپ خودکار: {12}\nشناسه: {13}', server['name'], project, tr(STATUS.get(server['status'], server['status'])), (public.get('ipv4') or {}).get('ip', tr('ندارد')), (public.get('ipv6') or {}).get('ip', tr('ندارد')), location_label, plan.get('name', '—'), plan.get('cores', '—'), plan.get('memory', '—'), server.get('disk', '—'), image.get('description') or image.get('name', '—'), gb(server.get('outgoing_traffic')), tr('فعال') if server.get('backup_window') else tr('غیرفعال'), server['id']))
 
 

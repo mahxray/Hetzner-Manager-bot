@@ -6,13 +6,14 @@ import logging
 import os
 import secrets
 import sqlite3
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 
 import httpx
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton as Button, InlineKeyboardMarkup as Keyboard, Update
+from telegram import CopyTextButton, InlineKeyboardButton as Button, InlineKeyboardMarkup as Keyboard, Update
 from telegram.error import BadRequest, TelegramError
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, MessageHandler, filters
 
@@ -45,8 +46,17 @@ LABELS = {
 
 
 def keyboard(rows):
-    return Keyboard([[Button(label if data.startswith(('p:', 'pic:', 'ip:', 'item:')) else tr(label), callback_data=data)
-                     for label, data in row] for row in rows])
+    buttons = []
+    for row in rows:
+        button_row = []
+        for label, data in row:
+            text = label if isinstance(data, str) and data.startswith(('p:', 'pic:', 'ip:', 'item:')) else tr(label)
+            if isinstance(data, tuple) and len(data) == 2 and data[0] == 'copy':
+                button_row.append(Button(text, copy_text=CopyTextButton(text=data[1])))
+            else:
+                button_row.append(Button(text, callback_data=data))
+        buttons.append(button_row)
+    return Keyboard(buttons)
 
 
 @dataclass(frozen=True)
@@ -73,10 +83,13 @@ def expire_state(state, now):
     pending = state.get("pending")
     if pending and pending.expires < now:
         state.pop("pending", None)
-    for key in ("input", "receipt"):
+    for key in ("input", "receipt", "restore"):
         value = state.get(key)
         if value and value.get("expires", float("inf")) < now:
             state.pop(key, None)
+            if key == 'restore' and value.get('path'):
+                with suppress(OSError):
+                    os.unlink(value['path'])
 
 
 class Manager:
@@ -108,9 +121,17 @@ class Manager:
     @staticmethod
     def reset(context):
         nav = context.user_data.get('nav')
+        Manager.discard_restore(context)
         context.user_data.clear()
         if nav:
             context.user_data['nav'] = nav
+
+    @staticmethod
+    def discard_restore(context):
+        state = context.user_data.pop('restore', None)
+        if state and state.get('path'):
+            with suppress(OSError):
+                os.unlink(state['path'])
 
     def authorized(self, update):
         allowed = (update.effective_user is not None and update.effective_chat is not None
@@ -198,6 +219,7 @@ class Manager:
     async def projects(self, update, context):
         if not self.authorized(update):
             return
+        self.discard_restore(context)
         context.user_data.clear()
         is_owner = update.effective_user.id in self.allowed
         projects = await asyncio.to_thread(self.store.granted_projects, update.effective_user.id, self.allowed)
@@ -217,7 +239,33 @@ class Manager:
     async def help(self, update, context):
         if not self.authorized(update):
             return
-        await update.effective_message.reply_text(tr('/projects — پروژه\u200cها\n/add — افزودن پروژه\n/cancel — لغو ورودی و تأیید\n۱. پروژه\u200cات را انتخاب کن.\n۲. وارد سرورها، اسنپ\u200cشات\u200cها یا IPها شو.\n۳. منبع و کار مورد نظر را انتخاب کن؛ بات مرحله\u200cبه\u200cمرحله راهنمایی می\u200cکند.\nساخت سرور: نام ← کشور ← پلن موجود ← سیستم\u200cعامل ← کلید SSH ← تأیید.\nابزارهای تخصصی در تنظیمات پروژه ← بخش پیشرفته هستند.\nهر تغییر نیازمند تأیید ۲ دقیقه\u200cای است. پاسخ running به معنی پایان عملیات نیست؛ دکمهٔ پیگیری را بزنید. پاسخ محرمانه فقط با درخواست جدا نمایش داده می\u200cشود.'))
+        await update.effective_message.reply_text(tr('/projects — پروژه\u200cها\n/add — افزودن پروژه\n/backup — دریافت پشتیبان داده‌های بات\n/restore — بازیابی پشتیبان بات\n/cancel — لغو ورودی و تأیید\n۱. پروژه\u200cات را انتخاب کن.\n۲. وارد سرورها، اسنپ\u200cشات\u200cها یا IPها شو.\n۳. منبع و کار مورد نظر را انتخاب کن؛ بات مرحله\u200cبه\u200cمرحله راهنمایی می\u200cکند.\nساخت سرور: نام ← کشور ← پلن موجود ← سیستم\u200cعامل ← کلید SSH ← تأیید.\nابزارهای تخصصی در تنظیمات پروژه ← بخش پیشرفته هستند.\nهر تغییر نیازمند تأیید ۲ دقیقه\u200cای است. پاسخ running به معنی پایان عملیات نیست؛ دکمهٔ پیگیری را بزنید. پاسخ محرمانه فقط با درخواست جدا نمایش داده می\u200cشود.'))
+
+    async def backup(self, update, context):
+        if not self.authorized(update):
+            return
+        self.require_owner(update)
+        with tempfile.NamedTemporaryFile(dir=self.store.path.parent, suffix='.sqlite3', delete=False) as file:
+            path = file.name
+        try:
+            await asyncio.to_thread(self.store.backup, path, update.effective_user.id)
+            with open(path, 'rb') as file:
+                await update.effective_message.reply_document(
+                    file, filename='hetzner-bot-backup.sqlite3',
+                    caption=tr('پشتیبان داده‌های بات. برای بازیابی، ENCRYPTION_KEY فعلی را حفظ کنید. فایل حاوی توکن‌های رمزگذاری‌شده است؛ آن را محرمانه نگه دارید.'))
+        finally:
+            with suppress(OSError):
+                os.unlink(path)
+
+    async def restore(self, update, context):
+        if not self.authorized(update):
+            return
+        self.require_owner(update)
+        self.discard_restore(context)
+        context.user_data.clear()
+        context.user_data['input'] = {'kind': 'restore_upload', 'expires': time.monotonic() + 600}
+        await update.effective_message.reply_text(
+            tr('فایل hetzner-bot-backup.sqlite3 را بفرستید. پشتیبان باید با همین نسخهٔ بات و ENCRYPTION_KEY ساخته شده باشد. تا تأیید نهایی، داده‌ای تغییر نمی‌کند. /cancel'))
 
     async def add(self, update, context):
         if not self.authorized(update):
@@ -242,6 +290,12 @@ class Manager:
             if server.get('status') == 'running':
                 rows.append([(tr('🔁 تعویض خودکار {0}', family.upper()),
                               f'ipauto:{pid}:{server_id}:{family}')])
+        copy_row = [(tr('📋 کپی {0}', family.upper()), ('copy', address))
+                    for family in ('ipv4', 'ipv6')
+                    if (address := (server.get('public_net', {}).get(family) or {}).get('ip'))
+                    and len(address) <= 256]
+        if copy_row:
+            rows.insert(0, copy_row)
         rows += [[(tr('➕ ساخت IP'), f"new:{pid}:{OPERATIONS.index(BY_ID['create_primary_ip'])}")],
                  [(tr('بازیابی IP ناتمام'), f'iprecover:{pid}:{server_id}')], [(tr('بازگشت به سرور'), f'srv:{pid}:{server_id}')]]
         guidance = (tr('\n\nبرای تعویض دستی یا جداسازی IP، سرور باید خاموش باشد. IP جداشده حذف نمی\u200cشود و ممکن است همچنان هزینه داشته باشد.')
@@ -453,7 +507,10 @@ class Manager:
             await self.show(update, tr('📸 {0}\nپروژه: {1}\nاندازه: {2} GB\nوضعیت: {3}', item.get('description') or item.get('name') or resource_id, project, item.get('image_size', '—'), item.get('status', '—')), [[(tr('♻️ بازیابی روی سرور'), f'restore:{pid}:{resource_id}')], [action(tr('✏️ تغییر نام'), 'update_image', resource_id), action(tr('🗑 حذف'), 'delete_image', resource_id)], [(tr('بازگشت'), f'images:{pid}:snapshot:1')]])
         elif kind == 'ip':
             item = (await self.cloud.execute(token, BY_ID['get_primary_ip'], {'path': {'id': resource_id}}))['primary_ip']
-            await self.show(update, tr('🌐 {0}\nپروژه: {1}\nIP: {2}\nسرور متصل: {3}', item['name'], project, item.get('ip', '—'), item.get('assignee_id') or tr('متصل نیست')), [[action(tr('اتصال به سرور'), 'assign_primary_ip', resource_id), action(tr('جدا کردن IP'), 'unassign_primary_ip', resource_id)], [action(tr('✏️ تغییر نام'), 'update_primary_ip', resource_id), action(tr('🗑 حذف IP'), 'delete_primary_ip', resource_id)], [(tr('بازگشت'), f'ips:{pid}:1')]])
+            rows = [[(tr('📋 کپی IP'), ('copy', item['ip']))] if item.get('ip') and len(item['ip']) <= 256 else [],
+                    [action(tr('اتصال به سرور'), 'assign_primary_ip', resource_id), action(tr('جدا کردن IP'), 'unassign_primary_ip', resource_id)], [action(tr('✏️ تغییر نام'), 'update_primary_ip', resource_id), action(tr('🗑 حذف IP'), 'delete_primary_ip', resource_id)], [(tr('بازگشت'), f'ips:{pid}:1')]]
+            rows = [row for row in rows if row]
+            await self.show(update, tr('🌐 {0}\nپروژه: {1}\nIP: {2}\nسرور متصل: {3}', item['name'], project, item.get('ip', '—'), item.get('assignee_id') or tr('متصل نیست')), rows)
 
     async def resources(self, update, pid, collection_index, page):
         name, token = await self.project(update, pid)
@@ -461,7 +518,9 @@ class Manager:
         label = tr(label)
         op = next(o for o in OPERATIONS if o['path'] == '/' + collection and o['method'] == 'GET')
         result = await self.cloud.execute(token, op, {"query": {"page": page, "per_page": 8}})
-        rows = [[(f"{resource.get('name') or resource.get('description') or resource.get('ip') or resource['id']} · {resource['id']}",
+        rows = [[(f"{resource.get('name') or resource.get('description') or resource.get('ip') or resource['id']}"
+                  + (f" · {resource['ip']}" if collection in {'floating_ips', 'primary_ips'} and resource.get('ip') else '')
+                  + f" · {resource['id']}",
                   f"item:{pid}:{collection_index}:{resource['id']}:0")]
                 for resource in result[collection]]
         nav = []
@@ -491,6 +550,11 @@ class Manager:
         if page == 0:
             result = await self.cloud.execute(token, get, {"path": {key: parameter}})
             await self.send_json(update, redact(result, (token,)))
+            resource = next(iter(result.values()), None)
+            if collection in {'floating_ips', 'primary_ips'} and isinstance(resource, dict) and resource.get('ip'):
+                await update.effective_message.reply_text(
+                    tr('🌐 IP: {0}', resource['ip']),
+                    reply_markup=keyboard([[(tr('📋 کپی IP'), ('copy', resource['ip']))]]))
         # Include all operations on the selected resource, including DNS RRSet subresources.
         rows = [[(title(o), f"edit:{pid}:{i}:{resource_id}")]
                 for i, o in operations[page*8:(page+1)*8]]
@@ -624,6 +688,32 @@ class Manager:
         await update.callback_query.answer()
         data = update.callback_query.data.split(":")
         kind = data[0]
+        if kind == 'backuprestore':
+            state = context.user_data.get('restore')
+            if (not state or state.get('actor') != update.effective_user.id
+                    or state['expires'] < time.monotonic()
+                    or not secrets.compare_digest(state['nonce'], data[1])):
+                self.discard_restore(context)
+                raise ValueError(tr('مهلت بازیابی تمام شده یا دکمه معتبر نیست.'))
+            self.require_owner(update)
+            path = state['path']
+            self.discard_restore(context)
+            pre_restore = tempfile.NamedTemporaryFile(dir=self.store.path.parent, suffix='.sqlite3', delete=False).name
+            try:
+                await asyncio.to_thread(self.store.backup, pre_restore, update.effective_user.id)
+                with open(pre_restore, 'rb') as file:
+                    await update.effective_message.reply_document(
+                        file, filename='hetzner-bot-before-restore.sqlite3',
+                        caption=tr('پشتیبان خودکار از داده‌های فعلی، برای بازگشت در صورت نیاز.'))
+                await asyncio.to_thread(self.store.restore, path, update.effective_user.id)
+                self.languages = await asyncio.to_thread(self.store.languages)
+                self.delegates = await asyncio.to_thread(self.store.admin_ids, self.allowed)
+                await update.effective_message.reply_text(tr('بازیابی انجام شد. پروژه‌ها، ادمین‌ها و تنظیمات شما جایگزین شدند؛ دادهٔ مالکان دیگر دست‌نخورده ماند.'))
+            finally:
+                for temporary in (path, pre_restore):
+                    with suppress(OSError):
+                        os.unlink(temporary)
+            return
         if kind == 'currency':
             if len(data) > 1:
                 await asyncio.to_thread(self.store.set_display_currency, update.effective_user.id, data[1])
@@ -669,8 +759,12 @@ class Manager:
             if receipt.get('simple'):
                 names = {'root_password': tr('گذرواژهٔ سرور'), 'password': tr('گذرواژه'),
                          'wss_url': tr('آدرس کنسول'), 'ticket': tr('کلید اتصال کنسول')}
+                values = receipt['value']
+                rows = [[(tr('📋 کپی {0}', names.get(k, k)), ('copy', v))]
+                        for k, v in values.items() if isinstance(v, str) and 0 < len(v) <= 256]
                 await update.effective_message.reply_text('\n'.join(
-                    f"{names.get(k, k)}: {v}" for k, v in receipt['value'].items()))
+                    f"{names.get(k, k)}: {v}" for k, v in values.items()),
+                    reply_markup=keyboard(rows) if rows else None)
             else:
                 await self.send_json(update, receipt["value"], "sensitive-result.json")
             return
@@ -783,6 +877,12 @@ class Manager:
             def action(label, op):
                 return (label, f"do:{pid}:{OPERATIONS.index(BY_ID[op])}:{server['id']}")
             rows = []
+            public_net = server.get('public_net') or {}
+            copy_row = [(tr('📋 کپی {0}', family.upper()), ('copy', address))
+                        for family in ('ipv4', 'ipv6')
+                        if (address := (public_net.get(family) or {}).get('ip')) and len(address) <= 256]
+            if copy_row:
+                rows.append(copy_row)
             if server.get('status') == 'off':
                 rows.append([action(tr('▶️ روشن کردن'), 'poweron_server')])
             elif server.get('status') == 'running':
@@ -915,6 +1015,36 @@ class Manager:
         if not self.authorized(update):
             return
         state = context.user_data.get("input", {})
+        if state.get('kind') == 'restore_upload':
+            self.require_owner(update)
+            document = update.effective_message.document
+            if state['expires'] < time.monotonic():
+                context.user_data.pop('input', None)
+                raise ValueError(tr('مهلت دریافت پشتیبان تمام شده است؛ /restore را دوباره بفرستید.'))
+            if not document.file_size or document.file_size > 20 * 1024 * 1024:
+                raise ValueError(tr('حجم فایل پشتیبان باید کمتر از ۲۰ مگابایت باشد.'))
+            file = await document.get_file()
+            raw = await file.download_as_bytearray()
+            if len(raw) > 20 * 1024 * 1024:
+                raise ValueError(tr('حجم فایل پشتیبان باید کمتر از ۲۰ مگابایت باشد.'))
+            with tempfile.NamedTemporaryFile(dir=self.store.path.parent, suffix='.sqlite3', delete=False) as temporary:
+                temporary.write(raw)
+                path = temporary.name
+            try:
+                await asyncio.to_thread(self.store.validate_backup, path, update.effective_user.id)
+            except Exception:
+                with suppress(OSError):
+                    os.unlink(path)
+                raise ValueError(tr('فایل پشتیبان معتبر نیست یا با کلید رمزگذاری فعلی سازگار نیست.')) from None
+            context.user_data.pop('input', None)
+            nonce = secrets.token_hex(12)
+            context.user_data['restore'] = {'path': path, 'nonce': nonce, 'actor': update.effective_user.id,
+                                            'expires': time.monotonic() + 120}
+            await update.effective_message.reply_text(
+                tr('⚠ بازیابی، پروژه‌ها و تنظیمات شما را با اطلاعات فایل جایگزین می‌کند؛ دادهٔ مالکان دیگر تغییر نمی‌کند. ابتدا پشتیبان فعلی شما ارسال می‌شود. ادامه می‌دهید؟'),
+                reply_markup=keyboard([[(tr('✅ تأیید بازیابی'), f'backuprestore:{nonce}'),
+                                       (tr('لغو'), 'cancel')]]))
+            return
         if state.get("kind") != "operation" and not (
                 state.get("kind") == "form" and self.forms.accepts_document(context)):
             raise ValueError(tr('اول عملیات JSON یا یک فیلد متنی فرم را انتخاب کنید؛ سپس فایل بفرستید.'))
@@ -1009,6 +1139,8 @@ def main():
     application.add_handler(CommandHandler("language", manager.language))
     application.add_handler(CommandHandler("admins", manager.manage_admins))
     application.add_handler(CommandHandler("currency", manager.currency_settings))
+    application.add_handler(CommandHandler("backup", manager.backup))
+    application.add_handler(CommandHandler("restore", manager.restore))
     application.add_handler(CallbackQueryHandler(manager.callback))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, manager.text))
     application.add_handler(MessageHandler(filters.Document.ALL, manager.document))
